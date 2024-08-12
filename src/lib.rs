@@ -3,6 +3,7 @@
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 extern crate alloc;
 
+pub use buffer::BufferPtr;
 pub use buffer_pool::{BufferPool, HeapBufferPool};
 pub use packet::{Packet, SendPacket};
 pub use write_flusher::{WriteFlusher, Flush};
