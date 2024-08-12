@@ -2,6 +2,13 @@
 name = "bab"
 version = "0.0.0"
 edition = "2021"
+description = "build a bus - low-level components for your next message bus"
+repository = "https://github.com/tedsta/bab"
+documentation = "https://docs.rs/bab"
+keywords = ["bus", "packet", "buffer", "pool", "thread-local"]
+categories = ["concurrency", "data-structures"]
+license = "MIT"
+readme = "README.md"
 
 [features]
 default = ["std"]
