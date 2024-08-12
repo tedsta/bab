@@ -41,7 +41,7 @@ An example of bab's thread-local optimizations: the cost of cloning a `Packet` i
 
 Another example is that `BufferPool` maintains a thread-local cache of buffers, repopulating it in batches if it becomes empty, and releasing buffers back to the shared pool in batches if the local cache becomes too full. Further, the `WaiterQueue` structure, which provides the async-ness of both `BufferPool` and `Writer`, goes through some effort to maintain only a single thread-safe waiter registration per thread. All additional waiters on a given thread are registered in a thread-local list.
 
-Criterion says that a stock `Vec::<u8>::with_capacity` and corresponding drop for a 1033 byte buffer takes ~32 ns while acquiring and releasing a buffer from a `bab::BufferPool` takes just over 8 ns. And the buffer pool has more functionality in that it also caps memory usage and notifies tasks waiting on buffers as buffers become available (though those code paths aren't exercised in this benchmark). In terms of functionality a more apt comparison would be 1) acquire semaphore permit 2) allocate buffer 3) release buffer 4) release semaphore permit.
+Criterion says that a stock `Vec::<u8>::with_capacity` and corresponding drop for a 1033 byte buffer takes ~32 ns while acquiring and releasing a buffer from a `bab::BufferPool` takes just over 8 ns. And the buffer pool has more functionality in that it also has fixed memory usage and notifies tasks waiting on buffers as buffers become available (though those code paths aren't exercised in this benchmark). So in terms of functionality perhaps a more apt comparison would be 1) acquire semaphore permit 2) allocate buffer 3) release buffer 4) release semaphore permit.
 
 ## Performance
 
