@@ -29,7 +29,7 @@ There are two somewhat related points that motivate bab - batching and thread-lo
 
 ### Batching
 
-Batching is a common theme in bab, but my favorite example if it is in `Writer` / `WriteFlusher`. Multiple writers on multiple threads can be writing messages to the same underlying buffer, and all of those messages (potentially across multiple buffers) can be sent to the flusher in a single (fairly expensive) O(1) operation. Notice that flushing isn't the only thing happening in batches here - a single buffer can contain multiple messages, so you can very naturally pack multiple messages into a single outgoing packet (imagine you're using UDP), which can help you make better use of your network's MTU (jumbo frames, anyone?).
+Batching is a common theme in bab, but my favorite example of it is in `Writer` / `WriteFlusher`. Multiple writers on multiple threads can be writing messages to the same underlying buffer, and all of those messages (potentially across multiple buffers) can be sent to the flusher in a single (fairly expensive) O(1) operation. And because a single buffer can contain multiple contiguous messages, you can very naturally pack multiple messages into a single outgoing packet (or syscall if using tcp or unix sockets), which can help make better use of your network's MTU (jumbo frames, anyone?).
 
 ### Thread-local optimizations
 
