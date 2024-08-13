@@ -38,7 +38,6 @@ fn main() {
     pollster::block_on(async {
         while received_bytes.get() < b"hello, world!".len() {
             receiver.flush().await;
-            println!("{}", received_bytes.get());
         }
     });
 }
