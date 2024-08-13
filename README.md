@@ -96,7 +96,7 @@ Criterion says that a stock `Vec::<u8>::with_capacity` and corresponding drop fo
 
 ## Performance
 
-There are some limited benchmarks - you can play with `examples/writer_benchmark.rs` which has some configurable dimensions. You can also look at `benches/` which has a benchmark for `Framer` and `BufferPool`. I'll update this section with some concrete numbers in the future. But if you structure your bus in a scalable way (don't have all threads using the same `Writer` if raw throughput is what you're after), you should have no problem getting 1M - 10M messages per second per core.
+There are some limited benchmarks - you can play with `examples/writer_benchmark.rs` which has some configurable dimensions. You can also look at `benches/` which has a benchmark for `Framer` and `BufferPool`. I'll update this section with some concrete numbers in the future. But if you structure your bus in a scalable way (don't have all threads using the same `Writer` if raw throughput is what you're after), you should have no problem getting upwards of 1 million messages per second per core.
 
 ## License
 
