@@ -360,7 +360,20 @@ impl Writer {
         }
     }
 
-    pub async fn reserve(&'_ self, len: usize) -> Write<'_> {
+    /// Reserve space on a buffer to write bytes to.
+    ///
+    /// Note that while it's possible to make this take `&self`, doing so is a footgun since
+    /// dropping `Write`s in a different order than they were acquired in on a single thread results
+    /// in a deadlock. Having the `Write` mutably borrow `self` prevents this at compile time.
+    /// 
+    /// ## Important Note
+    /// 
+    /// A bit of a footgun remains in that you could clone a `Writer` and acquire two simultaneous
+    /// reservations on the same thread and drop them out of order, which would cause a deadlock.
+    /// You should make the returned `Write` as shortlived as possible and especially avoid keeping
+    /// one alive across an await point. Besides avoiding deadlocks, subsequent `Write`s will busy
+    /// wait when dropped as long as any previous `Write` is still alive.
+    pub async fn reserve(&mut self, len: usize) -> Write {
         let buffer_size = self.inner.buffer_pool.buffer_size();
         if len > buffer_size {
             panic!("packet too big! len={} max={}", len, buffer_size);
@@ -533,15 +546,27 @@ impl Drop for Write<'_> {
             self.offset,
             (self.offset + self.len) | if self.is_buffer_done { WRITE_CURSOR_DONE } else { 0 },
         );
+
+        unsafe { self.buffer.release_ref(1); }
     }
 }
 
 impl From<Write<'_>> for crate::Packet {
     fn from(write: Write<'_>) -> Self {
-        Self::new(
+        write.writer.inner.flusher.advance_write_cursor(
+            write.buffer,
+            write.offset,
+            (write.offset + write.len) | if write.is_buffer_done { WRITE_CURSOR_DONE } else { 0 },
+        );
+
+        let packet = Self::new(
             write.buffer,
             write.offset as usize,
             write.len as usize,
-        )
+        );
+
+        core::mem::forget(write);
+
+        packet
     }
 }

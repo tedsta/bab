@@ -20,8 +20,8 @@ fn main() {
     let buffer_size = 1350;
     let buffer_pool = HeapBufferPool::new(buffer_size, 32, 256);
     let writer_flush_queue = WriterFlushQueue::new();
-    let sender_factory = WriterFactory::new(buffer_pool.clone(), writer_flush_queue.clone());
-    let sender = sender_factory.new_writer(0);
+    let writer_factory = WriterFactory::new(buffer_pool.clone(), writer_flush_queue.clone());
+    let writer = writer_factory.new_writer(0);
     let mut receiver = WriteFlusher::new(writer_flush_queue, {
         let flushed_bytes = flushed_bytes.clone();
         let write_payload = write_payload.clone();
@@ -36,8 +36,8 @@ fn main() {
     });
 
     for thread_id in 0..thread_count {
-        let sender = sender.clone(); // writers all using same buffer
-        //let sender = sender_factory.new_writer(0); // each writer gets its own buffer
+        let mut writer = writer.clone(); // writers all using same buffer
+        //let writer = writer_factory.new_writer(0); // each writer gets its own buffer
         let buffer_pool = buffer_pool.clone();
         let write_payload = write_payload.clone();
         std::thread::spawn(move || {
@@ -49,22 +49,22 @@ fn main() {
             pollster::block_on(async {
                 for _ in 0..(iter_count / batch_size / thread_count) {
                     for _ in 0..batch_size {
-                        let mut buf = sender.reserve(write_payload.len()).await;
-                        buf[..].copy_from_slice(&write_payload);
-                        let _: bab::Packet = buf.into();
+                        let mut write_buf = writer.reserve(write_payload.len()).await;
+                        write_buf[..].copy_from_slice(&write_payload);
+                        let _: bab::Packet = write_buf.into();
 
                         sent_messages += 1;
                     };
 
-                    sender.flush();
+                    writer.flush();
                 }
             });
 
             println!("Writer thread finished {}", thread_id);
         });
     }
-    drop(sender_factory);
-    drop(sender);
+    drop(writer_factory);
+    drop(writer);
 
     core_affinity::set_for_current(CoreId { id: 0 });
 
