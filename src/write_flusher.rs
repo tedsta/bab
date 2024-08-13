@@ -5,9 +5,9 @@ use crate::{
     writer::WriterFlushQueue,
 };
 
-pub struct WriteFlusher {
+pub struct WriteFlusher<'a> {
     flush_queue: WriterFlushQueue,
-    flush_fn: Box<dyn FnMut(Flush)>,
+    flush_fn: Box<dyn FnMut(Flush) + 'a>,
 }
 
 pub struct Flush {
@@ -19,10 +19,10 @@ pub struct Flush {
     _not_send: core::marker::PhantomData<*const ()>,
 }
 
-impl WriteFlusher {
+impl<'a> WriteFlusher<'a> {
     pub fn new(
         flush_queue: WriterFlushQueue,
-        flush_fn: impl FnMut(Flush) + 'static,
+        flush_fn: impl FnMut(Flush) + 'a,
     ) -> Self {
         Self {
             flush_queue,
