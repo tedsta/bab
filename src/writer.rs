@@ -361,18 +361,28 @@ impl Writer {
     }
 
     /// Reserve space on a buffer to write bytes to.
+    /// 
+    /// The returned `Write` handle can be dereferenced into a mutable `[u8]`. When finished
+    /// writing to the buffer, you can convert the `Write` handle to a `Packet` if desired:
+    /// 
+    /// ```no_run
+    /// let write_buf = writer.reserve(5).await;
+    /// write_buf[..].copy_from_slice(b"hello");
+    /// let packet: bab::Packet = write_buf.into();
+    /// ```
     ///
-    /// Note that while it's possible to make this take `&self`, doing so is a footgun since
-    /// dropping `Write`s in a different order than they were acquired in on a single thread results
-    /// in a deadlock. Having the `Write` mutably borrow `self` prevents this at compile time.
+    /// Note that while it is possible to make this method take `&self`, doing so is a footgun since
+    /// dropping `Write`s in a different order than they were acquired on a single thread results
+    /// in a deadlock. Having the `Write` mutably borrow `self` prevents this at compile time when
+    /// there is only a single instance of a `Writer` on any given thread.
     /// 
     /// ## Important Note
     /// 
     /// A bit of a footgun remains in that you could clone a `Writer` and acquire two simultaneous
     /// reservations on the same thread and drop them out of order, which would cause a deadlock.
     /// You should make the returned `Write` as shortlived as possible and especially avoid keeping
-    /// one alive across an await point. Besides avoiding deadlocks, subsequent `Write`s will busy
-    /// wait when dropped as long as any previous `Write` is still alive.
+    /// one alive across an await point. Besides avoiding deadlocks, subsequent `Write`s will
+    /// busy-wait when dropped as long as any previous `Write` is still alive.
     pub async fn reserve(&mut self, len: usize) -> Write {
         let buffer_size = self.inner.buffer_pool.buffer_size();
         if len > buffer_size {
