@@ -342,6 +342,24 @@ impl WriterInner {
 }
 
 impl Writer {
+    pub fn new(
+        buffer_pool: HeapBufferPool,
+        flush_queue: WriterFlushQueue,
+        writer_id: usize,
+    ) -> Self {
+        Self {
+            inner: Arc::new(WriterInner {
+                buffer_pool: buffer_pool,
+                cursor: CachePadded::new(
+                    AtomicU64::new(CURSOR_INIT | (0x0000 << CURSOR_BUF_SHIFT))
+                ),
+                flusher: WriterFlusher::new(flush_queue),
+                switch_buffer_waiters: WaiterQueue::new(),
+            }),
+            writer_id,
+        }
+    }
+
     pub async fn reserve(&'_ self, len: usize) -> Write<'_> {
         let buffer_size = self.inner.buffer_pool.buffer_size();
         if len > buffer_size {

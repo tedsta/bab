@@ -66,7 +66,7 @@ impl BufferPtr {
         buffer_local.ref_count.set(count);
         buffer_local.shared_rc_contribution.set(local_shared);
         if shared > 0 {
-            buffer.rc.store(shared, Ordering::Relaxed);
+            buffer.ref_count.store(shared, Ordering::Relaxed);
         }
 
         if count > 0 {
@@ -119,11 +119,11 @@ impl BufferPtr {
                 // This thread is the owner, so the shared reference count was never set -
                 // initialize it here since this buffer is going to be referenced by another
                 // thread.
-                buffer.rc.store(1 + count, Ordering::Relaxed);
+                buffer.ref_count.store(1 + count, Ordering::Relaxed);
                 buffer_local.shared_rc_contribution.set(1);
                 return count;
             } else {
-                buffer.rc.fetch_add(count, Ordering::Relaxed);
+                buffer.ref_count.fetch_add(count, Ordering::Relaxed);
                 return count;
             }
         }
@@ -169,7 +169,7 @@ impl BufferPtr {
         let prev_rc = buffer_local.ref_count.get();
         buffer_local.ref_count.set(prev_rc + count);
         buffer_local.shared_rc_contribution.set(buffer_local.shared_rc_contribution.get() + count);
-        buffer.rc.fetch_add(count, Ordering::Relaxed);
+        buffer.ref_count.fetch_add(count, Ordering::Relaxed);
 
         if prev_rc == 0 {
             unsafe { &*buffer.buffer_pool }.increment_local_buffers_in_use(local);
@@ -199,7 +199,7 @@ impl BufferPtr {
         let shared_rc_contribution = buffer_local.shared_rc_contribution.replace(0);
         if shared_rc_contribution > 0 {
             // time to release the buffer
-            let prev_rc = buffer.rc.fetch_sub(shared_rc_contribution, Ordering::Relaxed);
+            let prev_rc = buffer.ref_count.fetch_sub(shared_rc_contribution, Ordering::Relaxed);
             if prev_rc > shared_rc_contribution {
                 // There are still active references, don't release the buffer.
                 return;
@@ -270,22 +270,13 @@ impl BufferPtr {
     }
 }
 
-/*impl core::ops::Deref for BufferPtr {
-    type Target = Buffer;
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { self.ptr.as_ref() }
-    }
-}*/
-
 pub struct Buffer {
-    pub(crate) buffer_pool: *const BufferPool,
-    pub(crate) buffer_id: usize,
-    pub(crate) next: UnsafeCell<Option<BufferPtr>>,
-    pub(crate) write_cursor: AtomicU32,
-    pub(crate) flush_cursor: UnsafeCell<u32>,
-    // Reference count to use during active operation.
-    pub(crate) rc: AtomicU32,
+    buffer_pool: *const BufferPool,
+    buffer_id: usize,
+    next: UnsafeCell<Option<BufferPtr>>,
+    write_cursor: AtomicU32,
+    flush_cursor: UnsafeCell<u32>,
+    ref_count: AtomicU32,
 }
 
 impl Buffer {
@@ -314,7 +305,7 @@ impl Buffer {
         addr_of_mut!((*buffer).next).write(UnsafeCell::new(None));
         addr_of_mut!((*buffer).write_cursor).write(AtomicU32::new(0));
         addr_of_mut!((*buffer).flush_cursor).write(UnsafeCell::new(0));
-        addr_of_mut!((*buffer).rc).write(AtomicU32::new(0));
+        addr_of_mut!((*buffer).ref_count).write(AtomicU32::new(0));
         Self::data(buffer).write_bytes(0, capacity);
     }
 }

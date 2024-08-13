@@ -17,10 +17,68 @@ Bab is opinionated and a bit quirky - it uses thread-local optimizations and gen
 
 `Packet`s are also `!Send`. To send a packet across threads, you must call `Packet::send` on it to get a `SendPacket`. Then at the receiving thread call `SendPacket::receive` to convert it back into a `Packet`.
 
+## Usage
+
+### Writer
+
+```rust
+use std::{cell::Cell, rc::Rc};
+
+fn main() {
+    let buffer_size = 64;
+    let buffer_batch_count = 4;
+    let buffer_batch_size = 8;
+    let buffer_pool = bab::HeapBufferPool::new(buffer_size, buffer_batch_count, buffer_batch_size);
+    assert_eq!(buffer_pool.total_buffer_count(), buffer_batch_count * buffer_batch_size);
+
+    let writer_flush_queue = bab::WriterFlushQueue::new();
+    let writer  = bab::Writer::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
+
+    std::thread::spawn(move || {
+        pollster::block_on(async {
+            let mut write_buf = writer.reserve(7).await;
+            write_buf[..].copy_from_slice(b"hello, ");
+            let _: bab::Packet = write_buf.into();
+
+            let mut write_buf = writer.reserve(5).await;
+            write_buf[..].copy_from_slice(b"world");
+            let _: bab::Packet = write_buf.into();
+
+            writer.flush();
+
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            let mut write_buf = writer.reserve(1).await;
+            write_buf[..].copy_from_slice(b"!");
+            let _: bab::Packet = write_buf.into();
+
+            writer.flush();
+        });
+    });
+
+    let received_bytes = Rc::new(Cell::new(0));
+    let receiver = &mut bab::WriteFlusher::new(writer_flush_queue, {
+        let received_bytes = received_bytes.clone();
+        move |flush_buf| {
+            received_bytes.set(received_bytes.get() + flush_buf.len());
+            println!("Flushed bytes: '{}'", std::str::from_utf8(&flush_buf[..]).unwrap());
+        }
+    });
+    pollster::block_on(async move {
+        while received_bytes.get() < b"hello, world!".len() {
+            receiver.flush().await;
+            println!("{}", received_bytes.get());
+        }
+    });
+}
+```
+
 ## Roadmap
 
+- Refine the API
+    - Safe interface for `BufferPool` / `BufferPtr`?
+- Documentation
 - Add `LocalWriter` - a `!Send` version of `Writer`.
-- Safe interface for `BufferPool` / `BufferPtr`?
 - Loom tests
 
 ## Why?
@@ -33,7 +91,7 @@ Batching is a common theme in bab, but my favorite example of it is in `Writer` 
 
 ### Thread-local optimizations
 
-On my x86 [System76 Darter Pro](https://system76.com/laptops/darter) laptop (is it free product placement?), criterion says that an uncontended `AtomicUsize::fetch_add` takes ~5.5 ns whereas a non-atomic `usize::wrapping_add` takes ~280 ps (1 - 2 clock cycles?), both with core affinity set. So in our microbenchmark, an atomic add is an order of magnitude more expensive than its non-atomic counterpart, even with the affected cache line only ever accessed from the same core. Concurrent data structures certainly are not free.
+On my x86 [System76 Darter Pro](https://system76.com/laptops/darter) laptop, criterion says that an uncontended `AtomicUsize::fetch_add` takes ~5.5 ns whereas a non-atomic `usize::wrapping_add` takes ~280 ps (1 - 2 clock cycles?), both with core affinity set. So in our microbenchmark, an atomic add is an order of magnitude more expensive than its non-atomic counterpart, even with the affected cache line only ever accessed from the same core. Concurrent data structures certainly are not free.
 
 Bab offers hybrid concurrent data structures using thread-local optimizations to trade API convenience and implementation complexity for better performance.
 

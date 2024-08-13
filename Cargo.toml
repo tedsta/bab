@@ -1,6 +1,6 @@
 [package]
 name = "bab"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "build a bus - low-level components for your next message bus"
 repository = "https://github.com/tedsta/bab"

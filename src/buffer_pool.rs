@@ -79,7 +79,7 @@ pub struct BufferPool {
     alloc_layout: Layout,
     // Size of a single buffer, including padding for alignment, in self.alloc
     buffer_padded_size: usize,
-    total_buffer_count: u32,
+    total_buffer_count: usize,
     buffer_size: usize,
     batch_size: u32,
     free_stack: FreeStack,
@@ -113,7 +113,7 @@ unsafe impl Sync for BufferPool { }
 
 impl BufferPool {
     /// Get the total number of buffers from this pool that are in circulation.
-    pub fn total_buffer_count(&self) -> u32 {
+    pub fn total_buffer_count(&self) -> usize {
         self.total_buffer_count
     }
 
@@ -392,7 +392,7 @@ impl BufferPool {
         let prev_released_buffers =
             this.shutdown_released_buffers.fetch_add(released_buffers, Ordering::Relaxed);
 
-        if prev_released_buffers + released_buffers == this.total_buffer_count {
+        if prev_released_buffers + released_buffers == this.total_buffer_count as u32 {
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
@@ -402,8 +402,8 @@ impl BufferPool {
     pub(crate) fn already_shutdown_try_drop(buffer_pool: *mut BufferPool) {
         let this = unsafe { &*buffer_pool };
         if this.shutdown_released_buffers.compare_exchange(
-            this.total_buffer_count,
-            this.total_buffer_count,
+            this.total_buffer_count as u32,
+            this.total_buffer_count as u32,
             Ordering::Relaxed,
             Ordering::Relaxed,
         ).is_ok() {
@@ -451,10 +451,9 @@ impl HeapBufferPool {
             (layout, padded_size)
         }
 
-        let total_buffer_count = (batch_count * batch_size) as u32;
+        let total_buffer_count = batch_count * batch_size;
         let buffer_layout = Buffer::layout_with_data(buffer_size);
-        let (alloc_layout, buffer_padded_size) =
-            repeat_layout(buffer_layout, total_buffer_count as usize);
+        let (alloc_layout, buffer_padded_size) = repeat_layout(buffer_layout, total_buffer_count);
         let alloc = unsafe { std::alloc::alloc(alloc_layout) } as *mut Buffer;
 
         let buffer_pool = Box::new(BufferPool {
@@ -478,7 +477,7 @@ impl HeapBufferPool {
 
         // Initialize buffer descriptors
         for id in 0..total_buffer_count {
-            let buffer = buffer_pool.buffer_by_id(id);
+            let buffer = buffer_pool.buffer_by_id(id as u32);
             unsafe {
                 Buffer::initialize(buffer.as_ptr_mut(), buffer_pool_ptr, id as usize, buffer_size);
             }
