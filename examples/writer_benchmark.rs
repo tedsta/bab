@@ -6,8 +6,6 @@ use std::{
 use core_affinity::CoreId;
 
 fn main() {
-    use bab::{HeapBufferPool, WriterFactory, WriterFlushQueue, WriteFlusher};
-
     let message_size = 60;
     let write_payload: Vec<u8> = (0u16..message_size as _).map(|i| (i % 200) as u8).collect();
     let batch_size = 1000;
@@ -18,11 +16,10 @@ fn main() {
     let flushed_bytes = Rc::new(Cell::new(0));
 
     let buffer_size = 1350;
-    let buffer_pool = HeapBufferPool::new(buffer_size, 32, 256);
-    let writer_flush_queue = WriterFlushQueue::new();
-    let writer_factory = WriterFactory::new(buffer_pool.clone(), writer_flush_queue.clone());
-    let writer = writer_factory.new_writer(0);
-    let mut receiver = WriteFlusher::new(writer_flush_queue, {
+    let buffer_pool = bab::HeapBufferPool::new(buffer_size, 128, 256);
+    let writer_flush_queue = bab::WriterFlushQueue::new();
+    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
+    let mut receiver = bab::WriteFlusher::new(writer_flush_queue.clone(), {
         let flushed_bytes = flushed_bytes.clone();
         let write_payload = write_payload.clone();
         move |flush| {
@@ -36,12 +33,21 @@ fn main() {
     });
 
     for thread_id in 0..thread_count {
-        let mut writer = writer.clone(); // writers all using same buffer
-        //let writer = writer_factory.new_writer(0); // each writer gets its own buffer
+        //let writer = writer.clone(); // writers all using same buffer
+        let writer_flush_queue = writer_flush_queue.clone();
         let buffer_pool = buffer_pool.clone();
         let write_payload = write_payload.clone();
         std::thread::spawn(move || {
             core_affinity::set_for_current(CoreId { id: thread_id + 1 });
+
+            // each writer gets its own buffer
+            let writer = bab::LocalWriter::new(
+                buffer_pool.clone(),
+                writer_flush_queue.clone(),
+                0,
+            );
+
+            let writer = writer.to_dyn();
 
             let _buffer_pool_thread_guard = buffer_pool.register_thread();
 
@@ -63,7 +69,6 @@ fn main() {
             println!("Writer thread finished {}", thread_id);
         });
     }
-    drop(writer_factory);
     drop(writer);
 
     core_affinity::set_for_current(CoreId { id: 0 });
@@ -94,5 +99,5 @@ fn main() {
 
     let ns_per_iter = now.elapsed().as_nanos() / iter_count as u128;
 
-    println!("ns per iter: {}", ns_per_iter);
+    println!("ns per message flush: {}", ns_per_iter);
 }

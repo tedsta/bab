@@ -6,7 +6,7 @@ fn main() {
     assert_eq!(buffer_pool.total_buffer_count(), pool_batch_count * pool_batch_size);
 
     let writer_flush_queue = bab::WriterFlushQueue::new();
-    let mut writer = bab::Writer::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
+    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
 
     std::thread::spawn(move || {
         pollster::block_on(async {
