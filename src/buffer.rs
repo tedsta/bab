@@ -2,7 +2,7 @@ use core::{
     alloc::Layout,
     cell::UnsafeCell,
     ptr::NonNull,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, AtomicUsize, Ordering},
 };
 
 use crossbeam_utils::CachePadded;
@@ -254,6 +254,12 @@ impl BufferPtr {
         &self.as_ref().write_cursor
     }
 
+    // Technically unsafe but it's only used internally and we can eventually make it safe if we
+    // make BufferPtr a proper owned handle.
+    pub(crate) fn writer_id(&self) -> &AtomicUsize {
+        &self.as_ref().writer_id
+    }
+
     pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 {
         &mut *self.as_ref().flush_cursor.get()
     }
@@ -274,6 +280,7 @@ pub struct Buffer {
     buffer_pool: *const BufferPool,
     buffer_id: usize,
     next: UnsafeCell<Option<BufferPtr>>,
+    writer_id: AtomicUsize,
     write_cursor: AtomicU32,
     flush_cursor: UnsafeCell<u32>,
     ref_count: AtomicU32,
@@ -303,6 +310,7 @@ impl Buffer {
         addr_of_mut!((*buffer).buffer_pool).write(buffer_pool);
         addr_of_mut!((*buffer).buffer_id).write(buffer_id);
         addr_of_mut!((*buffer).next).write(UnsafeCell::new(None));
+        addr_of_mut!((*buffer).writer_id).write(AtomicUsize::new(usize::MAX));
         addr_of_mut!((*buffer).write_cursor).write(AtomicU32::new(0));
         addr_of_mut!((*buffer).flush_cursor).write(UnsafeCell::new(0));
         addr_of_mut!((*buffer).ref_count).write(AtomicU32::new(0));

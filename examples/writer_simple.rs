@@ -6,7 +6,8 @@ fn main() {
     assert_eq!(buffer_pool.total_buffer_count(), pool_batch_count * pool_batch_size);
 
     let writer_flush_queue = bab::WriterFlushQueue::new();
-    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
+    let writer_id = 42;
+    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), writer_id);
 
     std::thread::spawn(move || {
         pollster::block_on(async {
@@ -32,6 +33,7 @@ fn main() {
 
     let received_bytes = std::cell::Cell::new(0);
     let receiver = &mut bab::WriteFlusher::new(writer_flush_queue, |flush_buf| {
+        assert_eq!(flush_buf.writer_id(), writer_id);
         received_bytes.set(received_bytes.get() + flush_buf.len());
         println!("Flushed bytes: '{}'", std::str::from_utf8(&flush_buf[..]).unwrap());
     });

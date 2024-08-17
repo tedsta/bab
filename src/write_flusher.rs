@@ -40,6 +40,7 @@ impl<'a> WriteFlusher<'a> {
 
             let write_cursor = buffer.write_cursor()
                 .fetch_or(crate::writer::WRITE_CURSOR_FLUSHED_FLAG, Ordering::AcqRel);
+            let writer_id = buffer.writer_id().load(Ordering::Relaxed);
 
             let flush_cursor = unsafe { buffer.flush_cursor_mut() };
             let buffer_is_done = (write_cursor & crate::writer::WRITE_CURSOR_DONE) != 0;
@@ -58,9 +59,7 @@ impl<'a> WriteFlusher<'a> {
 
                 (self.flush_fn)(Flush {
                     buffer,
-                    // TODO
-                    writer_id: 0,
-                    //writer_id: buffer_progress.writer_id.unwrap(),
+                    writer_id,
                     offset,
                     len,
                     release_buffer: buffer_is_done,

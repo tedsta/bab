@@ -216,6 +216,7 @@ pub type SharedWriter = Writer<SharedCursor>;
 pub type LocalWriter = Writer<LocalCursor>;
 
 pub struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
+    writer_id: usize,
     buffer_pool: HeapBufferPool,
     flusher: WriterFlusher,
     switch_buffer_waiters: WaiterQueue<()>,
@@ -224,7 +225,6 @@ pub struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
 
 pub struct Writer<Cursor: sealed::WriterCursor + ?Sized> {
     inner: Arc<WriterInner<Cursor>>,
-    writer_id: usize,
 }
 
 const CURSOR_INIT: u64        = 0x8000_0000_0000_0000;
@@ -238,7 +238,6 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Clone for Writer<Cursor> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-            writer_id: self.writer_id,
         }
     }
 }
@@ -246,7 +245,8 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Clone for Writer<Cursor> {
 impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
     async fn switch_buffer(&self, initial_offset: u32) -> u32 {
         let next_buffer = self.buffer_pool.acquire().await;
-        next_buffer.write_cursor().store(0, Ordering::Relaxed);
+        next_buffer.writer_id().store(self.writer_id, Ordering::Relaxed);
+        next_buffer.write_cursor().store(0, Ordering::Release);
 
         let wanted_cursor =
             ((unsafe { next_buffer.id() } as u64) << CURSOR_BUF_SHIFT) |
@@ -426,12 +426,12 @@ impl<Cursor: sealed::WriterCursor + Default> Writer<Cursor> {
     ) -> Self {
         Self {
             inner: Arc::new(WriterInner {
+                writer_id,
                 buffer_pool: buffer_pool,
                 cursor: Cursor::default(),
                 flusher: WriterFlusher::new(flush_queue),
                 switch_buffer_waiters: WaiterQueue::new(),
             }),
-            writer_id,
         }
     }
 }
@@ -440,7 +440,6 @@ impl<Cursor: sealed::WriterCursor + 'static> Writer<Cursor> {
     pub fn to_dyn(self) -> DynWriter {
         Writer {
             inner: self.inner.clone(),
-            writer_id: self.writer_id,
         }
     }
 }
@@ -477,7 +476,8 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
         if len > buffer_size / 2 {
             // Big reservation - just grab a dedicated buffer for this one.
             let buffer = self.inner.buffer_pool.acquire().await;
-            buffer.write_cursor().store(0, Ordering::Relaxed);
+            buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+            buffer.write_cursor().store(0, Ordering::Release);
 
             unsafe { buffer.initialize_rc(1, 1, 2); }
 
