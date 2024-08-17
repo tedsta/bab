@@ -1,4 +1,7 @@
-use core::cell::UnsafeCell;
+use core::{
+    cell::UnsafeCell,
+    mem::MaybeUninit,
+};
 
 use crate::thread_id;
 
@@ -6,18 +9,21 @@ const DEFAULT_MAX_THREADS: usize = usize::BITS as usize;
 
 /// Thread-local per-object value.
 pub struct ThreadLocal<T: Send, const MAX_THREADS: usize = DEFAULT_MAX_THREADS> {
-    entries: [UnsafeCell<Option<T>>; MAX_THREADS],
+    entries: [UnsafeCell<MaybeUninit<T>>; MAX_THREADS],
+    is_present: [UnsafeCell<bool>; MAX_THREADS],
 }
 
 unsafe impl<const MAX_THREADS: usize, T: Send> Send for ThreadLocal<T, MAX_THREADS> { }
 unsafe impl<const MAX_THREADS: usize, T: Send> Sync for ThreadLocal<T, MAX_THREADS> { }
 
 impl<const MAX_THREADS: usize, T: Send> ThreadLocal<T, MAX_THREADS> {
-    const DEFAULT_ENTRY: UnsafeCell<Option<T>> = UnsafeCell::new(None);
+    const DEFAULT_ENTRY: UnsafeCell<MaybeUninit<T>> = UnsafeCell::new(MaybeUninit::uninit());
+    const DEFAULT_PRESENCE: UnsafeCell<bool> = UnsafeCell::new(false);
 
     pub fn new() -> Self {
         Self {
             entries: [Self::DEFAULT_ENTRY; MAX_THREADS],
+            is_present: [Self::DEFAULT_PRESENCE; MAX_THREADS],
         }
     }
 
@@ -76,20 +82,42 @@ impl<const MAX_THREADS: usize, T: Send> ThreadLocal<T, MAX_THREADS> {
 
     #[inline]
     fn get_inner(&self, thread_id: usize) -> Option<&T> {
-        unsafe { &*self.entries[thread_id].get() }.as_ref()
+        let is_present = unsafe { *self.is_present[thread_id].get() };
+        if is_present {
+            Some(unsafe {
+                (&*self.entries[thread_id].get()).assume_init_ref()
+            })
+        } else {
+            None
+        }
     }
 
     fn get_inner_ptr(&self, thread_id: usize) -> Option<*mut T> {
-        unsafe { &mut *self.entries[thread_id].get() }
-            .as_mut()
-            .map(|entry| entry as *mut _)
+        let is_present = unsafe { *self.is_present[thread_id].get() };
+        if is_present {
+            Some(unsafe { (&mut *self.entries[thread_id].get()).assume_init_mut() } as *mut _)
+        } else {
+            None
+        }
     }
 
     fn insert(&self, thread_id: usize, value: T) -> &T {
         unsafe {
+            *self.is_present[thread_id].get() = true;
+
             let entry = &mut *self.entries[thread_id].get();
-            *entry = Some(value);
-            entry.as_ref().unwrap_unchecked()
+            entry.write(value)
+        }
+    }
+}
+
+impl<const MAX_THREADS: usize, T: Send> Drop for ThreadLocal<T, MAX_THREADS> {
+    fn drop(&mut self) {
+        for thread_id in 0..MAX_THREADS {
+            let is_present = unsafe { *self.is_present[thread_id].get() };
+            if is_present {
+                unsafe { (&mut *self.entries[thread_id].get()).assume_init_drop() }
+            }
         }
     }
 }
