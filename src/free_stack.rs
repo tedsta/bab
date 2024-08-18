@@ -1,4 +1,7 @@
+#[cfg(feature = "alloc")]
+use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
 use crossbeam_utils::{atomic::AtomicCell, Backoff};
 
 use crate::buffer::{Buffer, BufferPtr};

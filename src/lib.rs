@@ -1,4 +1,8 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+#![cfg_attr(
+    all(not(feature = "std")),
+    feature(thread_local),
+)]
 
 #[cfg(all(not(feature = "std"), feature = "alloc"))]
 extern crate alloc;

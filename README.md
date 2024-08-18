@@ -2,6 +2,8 @@
 
 *Disclaimer: This crate is experimental and uses quite a few unsafe blocks. It is not ready for production. If you find bugs / UB / race conditions, please do file an issue. Loom tests are a todo.*
 
+*`no_std` is only supported on nightly until [`thread_local` is stabilized](https://github.com/rust-lang/rust/issues/29594). The `alloc` feature is required for `no_std` currently, but there are plans to lift this restriction in the future.*
+
 Have you ever wanted to build your own bus? No? Well now you can!
 
 ![crab builds a bus](./images/crab-builds-a-bus.png)
@@ -70,7 +72,7 @@ pollster::block_on(async {
 - Refine the API
     - Safe interface for `BufferPool` / `BufferPtr`?
 - Documentation
-- Add `LocalWriter` - a `!Send` version of `Writer`.
+- No-alloc support
 - Loom tests
 
 ## Why?

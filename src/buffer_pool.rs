@@ -7,6 +7,11 @@ use core::{
     task::{Context, Poll},
 };
 
+#[cfg(feature = "alloc")]
+use alloc::{alloc::{alloc, dealloc}, boxed::Box, vec::Vec};
+#[cfg(feature = "std")]
+use std::alloc::{alloc, dealloc};
+
 use crossbeam_utils::CachePadded;
 
 use crate::{
@@ -27,7 +32,8 @@ pub(crate) struct Local {
 unsafe impl Send for Local { }
 
 impl Local {
-    fn new(total_buffer_count: usize) -> Self {
+    #[cfg(any(feature = "std", feature = "alloc"))]
+    fn new_heap(total_buffer_count: usize) -> Self {
         let local_buffer_state = Box::into_raw(
             (0..total_buffer_count).map(|_| {
                 LocalBufferState {
@@ -142,7 +148,7 @@ impl BufferPool {
     }
 
     pub(crate) fn local(&self) -> &Local {
-        self.local.get_or(|| CachePadded::new(Local::new(self.total_buffer_count as usize)))
+        self.local.get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
     }
 
     pub(crate) fn increment_local_buffers_in_use(&self, local: &Local) {
@@ -421,7 +427,7 @@ impl Drop for BufferPool {
             let _ = unsafe { Box::from_raw(local.local_buffer_state as *mut [LocalBufferState]) };
         }
 
-        let _ = unsafe { std::alloc::dealloc(self.alloc as *mut u8, self.alloc_layout) };
+        let _ = unsafe { dealloc(self.alloc as *mut u8, self.alloc_layout) };
     }
 }
 
@@ -454,7 +460,7 @@ impl HeapBufferPool {
         let total_buffer_count = batch_count * batch_size;
         let buffer_layout = Buffer::layout_with_data(buffer_size);
         let (alloc_layout, buffer_padded_size) = repeat_layout(buffer_layout, total_buffer_count);
-        let alloc = unsafe { std::alloc::alloc(alloc_layout) } as *mut Buffer;
+        let alloc = unsafe { alloc(alloc_layout) } as *mut Buffer;
 
         let buffer_pool = Box::new(BufferPool {
             alloc,
@@ -754,7 +760,7 @@ mod test {
         f.append(Fulfillment { inner: e, count: 1});
 
         let mut notified_count = 0;
-        let calls = vec![
+        let calls = [
             (a, 3),
             (d, 1),
             (e, 1),
@@ -785,6 +791,7 @@ mod test {
         }
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn test_buffer_pool_local_acquire_waiter() {
         use std::rc::Rc;

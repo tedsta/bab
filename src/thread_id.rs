@@ -2,12 +2,15 @@ use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 static NEXT_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+
+#[cfg(feature = "std")]
 thread_local! {
     static THREAD_ID: Cell<ThreadId> = Cell::new(ThreadId::uninitialized());
 }
-// Hopefully this is stabilized one day, it is a bit faster.
-//#[thread_local]
-//static THREAD_ID: Cell<ThreadId> = Cell::new(ThreadId::uninitialized());
+
+#[cfg(not(feature = "std"))]
+#[thread_local]
+static THREAD_ID: Cell<ThreadId> = Cell::new(ThreadId::uninitialized());
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ThreadId(u32);
@@ -42,13 +45,12 @@ pub fn clear() {
 
 #[cfg(test)]
 mod test {
-    use super::*;
-
     #[cfg(feature = "std")]
     #[test]
     fn different_threads_have_different_ids() {
         use std::sync::mpsc;
         use std::thread;
+        use super::current;
 
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || tx.send(current()).unwrap()).join().unwrap();

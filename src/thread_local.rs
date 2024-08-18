@@ -148,10 +148,23 @@ mod test {
 
     #[test]
     fn test_thread_local_noncopy() {
-        let t = ThreadLocal::<Vec<u8>>::new();
-        assert_eq!(t.get(), None);
-        let v = t.get_or(|| vec![1, 2, 3]);
-        assert_eq!(v, &[1, 2, 3]);
+        struct TestDrop<'a> { some_value: u32, did_drop: &'a mut bool }
+        impl Drop for TestDrop<'_> {
+            fn drop(&mut self) {
+                *self.did_drop = true;
+            }
+        }
+
+        let mut did_drop = false;
+
+        let t = ThreadLocal::<TestDrop>::new();
+        assert!(t.get().is_none());
+
+        let v = t.get_or(|| TestDrop { some_value: 42, did_drop: &mut did_drop });
+        assert_eq!(v.some_value, 42);
+
+        drop(t);
+        assert!(did_drop);
     }
 
     #[cfg(feature = "std")]

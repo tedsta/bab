@@ -4,7 +4,11 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
     task::{Context, Poll, Waker},
 };
+
+#[cfg(feature = "std")]
 use std::sync::Arc;
+#[cfg(feature = "alloc")]
+use alloc::sync::Arc;
 
 use crossbeam_utils::{Backoff, CachePadded};
 use spin::Mutex;
