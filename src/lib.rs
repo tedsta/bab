@@ -12,6 +12,7 @@ pub use buffer_pool::{BufferPool, HeapBufferPool};
 pub use packet::{Packet, SendPacket};
 pub use write_flusher::{WriteFlusher, Flush};
 pub use framer::Framer;
+pub use signal::Signal;
 pub use thread_local::ThreadLocal;
 pub use writer::{DynWriter, LocalWriter, SharedWriter, Writer, WriterFlushQueue};
 
@@ -21,6 +22,7 @@ mod free_stack;
 mod packet;
 mod write_flusher;
 mod framer;
+mod signal;
 pub mod thread_id;
 mod thread_local;
 mod writer;

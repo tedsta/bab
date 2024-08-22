@@ -583,20 +583,20 @@ pub struct Acquire<'a> {
 }
 
 impl<'a> Acquire<'a> {
-    fn waiter(self: Pin<&'_ mut Self>) -> Pin<&'_ mut Waiter<'a, BufferPtr>> {
+    fn waiter(self: Pin<&'_ Self>) -> Pin<&'_ Waiter<'a, BufferPtr>> {
         // SAFETY: `waiter` is pinned when `self` is.
-        unsafe { self.map_unchecked_mut(|s| &mut s.waiter) }
+        unsafe { self.map_unchecked(|s| &s.waiter) }
     }
 }
 
 impl Future for Acquire<'_> {
     type Output = BufferPtr;
 
-    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let buffer_pool = self.buffer_pool;
         let local = self.buffer_pool.local();
         let Poll::Ready(fulfillment) =
-            self.as_mut().waiter().poll_fulfillment(
+            self.as_ref().waiter().poll_fulfillment(
                 context,
                 || {
                     if let Some(local_head) = local.head.replace(None) {
@@ -836,7 +836,9 @@ mod test {
                 .detach();
             }
 
-            acquire_starts.acquire_many(waiter_count).await.unwrap();
+            for _ in 0..waiter_count {
+                acquire_starts.acquire().await.unwrap().forget();
+            }
 
             // Release all the buffers
             for _ in 0..batch_count * batch_size + waiter_count {

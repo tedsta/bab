@@ -524,7 +524,7 @@ impl<'a, T: IFulfillment> Waiter<'a, T> {
     }
 
     pub fn poll_fulfillment(
-        self: Pin<&'_ mut Self>,
+        self: Pin<&'_ Self>,
         context: &'_ mut Context<'_>,
         mut try_fulfill: impl FnMut() -> Option<Fulfillment<T>>,
     ) -> Poll<Fulfillment<T>> {

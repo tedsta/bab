@@ -265,9 +265,9 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
     async fn wait_for_buffer(&self, cursor: u64) {
         let prev_buf_index = cursor & CURSOR_BUF_MASK;
 
-        let mut waiter = core::pin::pin!(self.switch_buffer_waiters.wait());
+        let waiter = core::pin::pin!(self.switch_buffer_waiters.wait());
         core::future::poll_fn(move |cx| {
-            waiter.as_mut().poll_fulfillment(cx, || {
+            waiter.as_ref().poll_fulfillment(cx, || {
                 let cursor = self.cursor.get();
                 let buf_index = cursor & CURSOR_BUF_MASK;
                 let offset = (cursor & CURSOR_OFFSET_MASK) as u32;
