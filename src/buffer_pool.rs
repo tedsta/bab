@@ -204,7 +204,7 @@ impl BufferPool {
         // Need to wait for a buffer to become available.
         let buffer = Acquire {
             buffer_pool: self,
-            waiter: Waiter::new(&self.waiter_queue),
+            waiter: &Waiter::new(&self.waiter_queue),
         }
         .await;
 
@@ -579,13 +579,13 @@ impl IFulfillment for BufferPtr {
 
 pub struct Acquire<'a> {
     buffer_pool: &'a BufferPool,
-    waiter: Waiter<'a, BufferPtr>,
+    waiter: &'a Waiter<'a, BufferPtr>,
 }
 
 impl<'a> Acquire<'a> {
     fn waiter(self: Pin<&'_ Self>) -> Pin<&'_ Waiter<'a, BufferPtr>> {
         // SAFETY: `waiter` is pinned when `self` is.
-        unsafe { self.map_unchecked(|s| &s.waiter) }
+        unsafe { self.map_unchecked(|s| s.waiter) }
     }
 }
 

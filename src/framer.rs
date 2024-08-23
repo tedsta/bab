@@ -94,6 +94,12 @@ impl Framer {
         } else {
             // No new messages were written since the last call to `finish_frame` - decrement the
             // reference count on the current buffer.
+            if write_cursor.start == 0 {
+                // No messages were written on this buffer at all, so the reference count was never
+                // initialized.
+                unsafe { write_cursor.buffer.initialize_rc(1, 0, 0); }
+            }
+
             unsafe { write_cursor.buffer.release_ref(1); }
 
             None

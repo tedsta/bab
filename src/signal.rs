@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::waiter_queue::{Fulfillment, WaiterQueue};
+use crate::waiter_queue::WaiterQueue;
 
 pub struct Signal {
     is_notified: AtomicBool,
@@ -30,17 +30,7 @@ impl Signal {
     }
 
     pub async fn wait(&self) {
-        let waiter = core::pin::pin!(self.waiter_queue.wait());
-        core::future::poll_fn(move |cx| {
-            waiter.as_ref().poll_fulfillment(cx, || {
-                if self.is_notified() {
-                    Some(Fulfillment { inner: (), count: 1 })
-                } else {
-                    None
-                }
-            })
-        })
-        .await;
+        self.waiter_queue.wait_until(|| self.is_notified()).await;
     }
 
     #[cfg(any(feature = "std", feature = "alloc"))]

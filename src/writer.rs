@@ -16,7 +16,7 @@ use spin::Mutex;
 use crate::{
     buffer::BufferPtr,
     thread_local::ThreadLocal,
-    waiter_queue::{Fulfillment, WaiterQueue},
+    waiter_queue::WaiterQueue,
     HeapBufferPool,
 };
 
@@ -265,19 +265,11 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
     async fn wait_for_buffer(&self, cursor: u64) {
         let prev_buf_index = cursor & CURSOR_BUF_MASK;
 
-        let waiter = core::pin::pin!(self.switch_buffer_waiters.wait());
-        core::future::poll_fn(move |cx| {
-            waiter.as_ref().poll_fulfillment(cx, || {
-                let cursor = self.cursor.get();
-                let buf_index = cursor & CURSOR_BUF_MASK;
-                let offset = (cursor & CURSOR_OFFSET_MASK) as u32;
-
-                if buf_index != prev_buf_index || offset < self.buffer_pool.buffer_size() as u32 {
-                    Some(Fulfillment { inner: (), count: 1 })
-                } else {
-                    None
-                }
-            })
+        self.switch_buffer_waiters.wait_until(|| {
+            let cursor = self.cursor.get();
+            let buf_index = cursor & CURSOR_BUF_MASK;
+            let offset = (cursor & CURSOR_OFFSET_MASK) as u32;
+            buf_index != prev_buf_index || offset < self.buffer_pool.buffer_size() as u32
         })
         .await;
     }

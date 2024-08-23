@@ -208,10 +208,6 @@ impl<T: IFulfillment> WaiterQueue<T> {
         }
     }
 
-    pub fn wait(&self) -> Waiter<T> {
-        Waiter::new(&self)
-    }
-
     pub fn notify_one_local(&self, fulfillment: T) -> Option<T> {
         let local = self.local.get_or_default();
 
@@ -259,6 +255,24 @@ impl<T: IFulfillment> WaiterQueue<T> {
     fn remove_local_waiter(&self, to_remove: &WaiterNode<T>) {
         let local = self.local.get_or_default();
         local.remove_node(to_remove);
+    }
+}
+
+impl WaiterQueue<()> {
+    /// # Safety
+    ///
+    /// You must call cancel the returned waiter before it is dropped.
+    pub unsafe fn wait(&self) -> Waiter<()> {
+        Waiter::new(&self)
+    }
+
+    pub async fn wait_until(&self, condition: impl Fn() -> bool) {
+        WaitUntil {
+            // SAFETY: WaitUntil::drop cancels the Waiter if necessary.
+            waiter: &unsafe { self.wait() },
+            condition,
+        }
+        .await;
     }
 }
 
@@ -631,6 +645,49 @@ impl<'a, T: IFulfillment> Waiter<'a, T> {
         }
 
         Poll::Pending
+    }
+}
+
+pub struct WaitUntil<'a, F> {
+    waiter: &'a Waiter<'a, ()>,
+    condition: F,
+}
+
+impl<'a, F> WaitUntil<'a, F> {
+    fn waiter(self: Pin<&'_ Self>) -> Pin<&'_ Waiter<'a, ()>> {
+        // SAFETY: `waiter` is pinned when `self` is.
+        unsafe { self.map_unchecked(|s| s.waiter) }
+    }
+}
+
+impl<F> core::future::Future for WaitUntil<'_, F>
+    where F: Fn() -> bool
+{
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let Poll::Ready(fulfillment) =
+            self.as_ref().waiter().poll_fulfillment(
+                context,
+                || {
+                    if (self.condition)() {
+                        Some(Fulfillment { inner: (), count: usize::MAX })
+                    } else {
+                        None
+                    }
+                }
+            )
+        else {
+            return Poll::Pending;
+        };
+
+        Poll::Ready(fulfillment.inner)
+    }
+}
+
+impl<F> Drop for WaitUntil<'_, F> {
+    fn drop(&mut self) {
+        let _ = self.waiter.cancel();
     }
 }
 
