@@ -182,7 +182,7 @@ impl BufferPtr {
         let local = unsafe { &*buffer.buffer_pool }.local();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
-        assert!(buffer_local.ref_count.get() >= count);
+        debug_assert!(buffer_local.ref_count.get() >= count);
 
         buffer_local.ref_count.set(buffer_local.ref_count.get() - count);
         if buffer_local.ref_count.get() > 0 {
