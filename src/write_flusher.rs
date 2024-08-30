@@ -1,5 +1,3 @@
-#[cfg(feature = "alloc")]
-use alloc::boxed::Box;
 use core::sync::atomic::Ordering;
 
 use crate::{
@@ -7,9 +5,8 @@ use crate::{
     writer::WriterFlushQueue,
 };
 
-pub struct WriteFlusher<'a> {
+pub struct WriteFlusher {
     flush_queue: WriterFlushQueue,
-    flush_fn: Box<dyn FnMut(Flush) + 'a>,
 }
 
 pub struct Flush {
@@ -21,24 +18,33 @@ pub struct Flush {
     _not_send: core::marker::PhantomData<*const ()>,
 }
 
-impl<'a> WriteFlusher<'a> {
+impl WriteFlusher {
     pub fn new(
         flush_queue: WriterFlushQueue,
-        flush_fn: impl FnMut(Flush) + 'a,
     ) -> Self {
         Self {
             flush_queue,
-            flush_fn: Box::new(flush_fn),
         }
     }
 
-    pub async fn flush(&mut self) {
-        let mut recv_head = Some(self.flush_queue.receive().await);
+    pub async fn flush(&mut self) -> FlushIterator {
+        let recv_head = self.flush_queue.receive().await;
+        FlushIterator { head: Some(recv_head) }
+    }
+}
 
-        while let Some(buffer) = recv_head {
+pub struct FlushIterator {
+    head: Option<BufferPtr>,
+}
+
+impl core::iter::Iterator for FlushIterator {
+    type Item = Flush;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(buffer) = self.head {
             // Note: it's important that this is done *before* fetch_or'ing the write_cursor while
             // we still have exclusive access.
-            recv_head = unsafe { buffer.swap_next(None) };
+            self.head = unsafe { buffer.swap_next(None) };
 
             let write_cursor = buffer.write_cursor()
                 .fetch_or(crate::writer::WRITE_CURSOR_FLUSHED_FLAG, Ordering::AcqRel);
@@ -59,7 +65,7 @@ impl<'a> WriteFlusher<'a> {
                 let len = (write_cursor - *flush_cursor) as usize;
                 *flush_cursor = write_cursor;
 
-                (self.flush_fn)(Flush {
+                return Some(Flush {
                     buffer,
                     writer_id,
                     offset,
@@ -73,6 +79,14 @@ impl<'a> WriteFlusher<'a> {
                 unsafe { buffer.release_ref(1); }
             }
         }
+
+        None
+    }
+}
+
+impl Drop for FlushIterator {
+    fn drop(&mut self) {
+        while self.next().is_some() { }
     }
 }
 
