@@ -19,18 +19,7 @@ fn main() {
     let buffer_pool = bab::HeapBufferPool::new(buffer_size, 128, 256);
     let writer_flush_queue = bab::WriterFlushQueue::new();
     let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
-    let mut receiver = bab::WriteFlusher::new(writer_flush_queue.clone(), {
-        let flushed_bytes = flushed_bytes.clone();
-        let write_payload = write_payload.clone();
-        move |flush| {
-            flushed_bytes.set(flushed_bytes.get() + flush.len());
-
-            for i in 0..flush.len() / message_size {
-                let start = i * message_size;
-                assert_eq!(&flush[start..start + message_size], &write_payload);
-            }
-        }
-    });
+    let mut receiver = bab::WriteFlusher::new(writer_flush_queue.clone());
 
     for thread_id in 0..thread_count {
         //let writer = writer.clone(); // writers all using same buffer
@@ -84,7 +73,14 @@ fn main() {
 
         let mut next_progress = 0;
         while flushed_bytes.get() < expected_message_count * message_size {
-            receiver.flush().await;
+            for flush in receiver.flush().await {
+                flushed_bytes.set(flushed_bytes.get() + flush.len());
+
+                for i in 0..flush.len() / message_size {
+                    let start = i * message_size;
+                    assert_eq!(&flush[start..start + message_size], &write_payload);
+                }
+            }
 
             let received_messages = flushed_bytes.get() / message_size;
             if received_messages >= next_progress {

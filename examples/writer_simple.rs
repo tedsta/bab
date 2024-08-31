@@ -32,14 +32,14 @@ fn main() {
     });
 
     let received_bytes = std::cell::Cell::new(0);
-    let receiver = &mut bab::WriteFlusher::new(writer_flush_queue, |flush_buf| {
-        assert_eq!(flush_buf.writer_id(), writer_id);
-        received_bytes.set(received_bytes.get() + flush_buf.len());
-        println!("Flushed bytes: '{}'", std::str::from_utf8(&flush_buf[..]).unwrap());
-    });
+    let receiver = &mut bab::WriteFlusher::new(writer_flush_queue);
     pollster::block_on(async {
         while received_bytes.get() < b"hello, world!".len() {
-            receiver.flush().await;
+            for flush in receiver.flush().await {
+                assert_eq!(flush.writer_id(), writer_id);
+                received_bytes.set(received_bytes.get() + flush.len());
+                println!("Flushed bytes: '{}'", std::str::from_utf8(&flush[..]).unwrap());
+            }
         }
     });
 }
