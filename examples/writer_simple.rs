@@ -5,9 +5,9 @@ fn main() {
     let buffer_pool = bab::HeapBufferPool::new(buffer_size, pool_batch_count, pool_batch_size);
     assert_eq!(buffer_pool.total_buffer_count(), pool_batch_count * pool_batch_size);
 
-    let writer_flush_queue = bab::WriterFlushQueue::new();
+    let (writer_flush_sender, mut writer_flush_receiver) = bab::new_writer_flusher();
     let writer_id = 42;
-    let writer = bab::Writer::new_shared(buffer_pool, writer_flush_queue.clone(), writer_id);
+    let writer = bab::Writer::new_shared(buffer_pool, writer_flush_sender.clone(), writer_id);
 
     std::thread::spawn(move || {
         pollster::block_on(async {
@@ -32,10 +32,9 @@ fn main() {
     });
 
     let received_bytes = std::cell::Cell::new(0);
-    let receiver = &mut bab::WriteFlusher::new(writer_flush_queue);
     pollster::block_on(async {
         while received_bytes.get() < b"hello, world!".len() {
-            for flush in receiver.flush().await {
+            for flush in writer_flush_receiver.flush().await {
                 assert_eq!(flush.writer_id(), writer_id);
                 received_bytes.set(received_bytes.get() + flush.len());
                 println!("Flushed bytes: '{}'", std::str::from_utf8(&flush[..]).unwrap());
