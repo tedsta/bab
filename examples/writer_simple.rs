@@ -7,7 +7,7 @@ fn main() {
 
     let writer_flush_queue = bab::WriterFlushQueue::new();
     let writer_id = 42;
-    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), writer_id);
+    let writer = bab::Writer::new_shared(buffer_pool, writer_flush_queue.clone(), writer_id);
 
     std::thread::spawn(move || {
         pollster::block_on(async {

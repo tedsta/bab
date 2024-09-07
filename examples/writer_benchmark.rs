@@ -18,9 +18,9 @@ fn main() {
     let buffer_size = 1350;
     let buffer_pool = bab::HeapBufferPool::new(buffer_size, 128, 256);
     let writer_flush_queue = bab::WriterFlushQueue::new();
-    let writer = bab::SharedWriter::new(buffer_pool.clone(), writer_flush_queue.clone(), 0);
     let mut receiver = bab::WriteFlusher::new(writer_flush_queue.clone());
 
+    let writer = bab::Writer::new_shared(buffer_pool.clone(), writer_flush_queue.clone(), 0);
     for thread_id in 0..thread_count {
         //let writer = writer.clone(); // writers all using same buffer
         let writer_flush_queue = writer_flush_queue.clone();
@@ -30,7 +30,7 @@ fn main() {
             core_affinity::set_for_current(CoreId { id: thread_id + 1 });
 
             // each writer gets its own buffer
-            let writer = bab::LocalWriter::new(
+            let writer = bab::Writer::new_local_flush(
                 buffer_pool.clone(),
                 writer_flush_queue.clone(),
                 0,

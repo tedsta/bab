@@ -14,7 +14,7 @@ pub use write_flusher::{WriteFlusher, Flush};
 pub use framer::Framer;
 pub use signal::Signal;
 pub use thread_local::ThreadLocal;
-pub use writer::{DynWriter, LocalWriter, SharedWriter, Writer, WriterFlushQueue};
+pub use writer::{DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter, Writer, WriterFlushQueue};
 
 mod buffer;
 mod buffer_pool;

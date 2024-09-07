@@ -217,12 +217,12 @@ impl Drop for WriterFlusher {
 
 pub type DynWriter = Writer<dyn sealed::WriterCursor>;
 pub type SharedWriter = Writer<SharedCursor>;
-pub type LocalWriter = Writer<LocalCursor>;
+pub type LocalWriter = Writer<LocalCursor<WriterFlusher>>;
+pub type LocalWriterNoFlush = Writer<LocalCursor<NoopFlusher>>;
 
 pub struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
     writer_id: usize,
     buffer_pool: HeapBufferPool,
-    flusher: WriterFlusher,
     switch_buffer_waiters: WaiterQueue<()>,
     cursor: Cursor,
 }
@@ -234,7 +234,7 @@ pub struct Writer<Cursor: sealed::WriterCursor + ?Sized> {
 const CURSOR_INIT: u64        = 0x8000_0000_0000_0000;
 const CLAIM_CURSOR_INIT: u64  = 0x4000_0000_0000_0000;
 const CURSOR_BUF_MASK: u64    = 0x0FFF_FFFF_0000_0000;
-const CURSOR_OFFSET_MASK: u64 = 0x0000_0000_0000_FFFF;
+const CURSOR_OFFSET_MASK: u64 = 0x0000_0000_000F_FFFF;
 
 const CURSOR_BUF_SHIFT: u64   = 32;
 
@@ -284,18 +284,24 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
 
         if is_initialized && offset < buffer_size as u32 {
             let buffer = self.buffer_pool.buffer_by_id(buffer_id);
-            self.cursor.finish_buffer(buffer);
-            self.flusher.advance_write_cursor(
+            self.cursor.advance_write_cursor(
                 buffer,
                 offset,
                 offset | WRITE_CURSOR_DONE,
             );
+            self.cursor.finish_buffer(buffer);
         }
     }
 }
 
 mod sealed {
     use crate::BufferPtr;
+
+    pub trait Flusher {
+        fn flush(&self);
+
+        fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32);
+    }
 
     pub trait WriterCursor {
         fn get(&self) -> u64;
@@ -311,11 +317,38 @@ mod sealed {
         fn take_ref(&self, buffer: BufferPtr);
 
         fn release_buffer(&self) -> u64;
+
+        fn flush(&self);
+
+        fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32);
+    }
+}
+
+pub struct NoopFlusher;
+
+impl sealed::Flusher for NoopFlusher {
+    fn flush(&self) { }
+
+    fn advance_write_cursor(&self, _buffer: BufferPtr, _write_start: u32, _new_write_cursor: u32) { }
+}
+
+impl Default for NoopFlusher {
+    fn default() -> Self { Self }
+}
+
+impl sealed::Flusher for WriterFlusher {
+    fn flush(&self) {
+        WriterFlusher::flush(self);
+    }
+
+    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
+        WriterFlusher::advance_write_cursor(self, buffer, write_start, new_write_cursor);
     }
 }
 
 pub struct SharedCursor {
     cursor: CachePadded<AtomicU64>,
+    flusher: WriterFlusher,
 }
 
 impl sealed::WriterCursor for SharedCursor {
@@ -353,21 +386,31 @@ impl sealed::WriterCursor for SharedCursor {
     fn release_buffer(&self) -> u64 {
         self.cursor.swap(CURSOR_INIT, Ordering::Relaxed)
     }
+
+    fn flush(&self) {
+        self.flusher.flush();
+    }
+
+    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
+        self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
+    }
 }
 
-impl Default for SharedCursor {
-    fn default() -> Self {
+impl SharedCursor {
+    fn new(flush_queue: WriterFlushQueue) -> Self {
         Self {
             cursor: CachePadded::new(AtomicU64::new(CURSOR_INIT)),
+            flusher: WriterFlusher::new(flush_queue),
         }
     }
 }
 
-pub struct LocalCursor {
+pub struct LocalCursor<Flusher> {
     cursor: Cell<u64>,
+    flusher: Flusher,
 }
 
-impl sealed::WriterCursor for LocalCursor {
+impl sealed::WriterCursor for LocalCursor<WriterFlusher> {
     fn get(&self) -> u64 {
         self.cursor.get()
     }
@@ -404,28 +447,115 @@ impl sealed::WriterCursor for LocalCursor {
     fn release_buffer(&self) -> u64 {
         self.cursor.replace(CURSOR_INIT)
     }
+
+    fn flush(&self) {
+        self.flusher.flush();
+    }
+
+    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
+        self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
+    }
 }
 
-impl Default for LocalCursor {
-    fn default() -> Self {
+impl sealed::WriterCursor for LocalCursor<NoopFlusher> {
+    fn get(&self) -> u64 {
+        self.cursor.get()
+    }
+
+    fn start_buffer(&self, v: u64, next_buffer: BufferPtr) {
+        // 2 local refs: 1 for the writer, one for the first packet
+        unsafe { next_buffer.initialize_rc(2, 0, 0); }
+        self.cursor.set(v);
+    }
+
+    fn finish_buffer(&self, prev_buffer: BufferPtr) {
+        unsafe {
+            prev_buffer.release_ref(1);
+        }
+    }
+
+    fn try_reserve(&self, len: u64) -> u64 {
+        let prev = self.cursor.get();
+        self.cursor.set(prev + len);
+        prev
+    }
+
+    fn try_init(&self) -> u64 {
+        let prev = self.cursor.get();
+        self.cursor.set(prev | CLAIM_CURSOR_INIT);
+        prev
+    }
+
+    fn take_ref(&self, buffer: BufferPtr) {
+        unsafe { buffer.take_ref(1); }
+    }
+
+    fn release_buffer(&self) -> u64 {
+        self.cursor.replace(CURSOR_INIT)
+    }
+
+    fn flush(&self) {
+        sealed::Flusher::flush(&self.flusher);
+    }
+
+    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
+        sealed::Flusher::advance_write_cursor(&self.flusher, buffer, write_start, new_write_cursor);
+    }
+}
+
+impl<Flusher> LocalCursor<Flusher> {
+    fn new(flusher: Flusher) -> Self {
         Self {
             cursor: Cell::new(CURSOR_INIT),
+            flusher,
         }
     }
 }
 
-impl<Cursor: sealed::WriterCursor + Default> Writer<Cursor> {
-    pub fn new(
+impl Writer<SharedCursor> {
+    pub fn new_shared(
         buffer_pool: HeapBufferPool,
         flush_queue: WriterFlushQueue,
         writer_id: usize,
     ) -> Self {
+        Self::new(buffer_pool, SharedCursor::new(flush_queue), writer_id)
+    }
+}
+
+impl Writer<LocalCursor<WriterFlusher>> {
+    pub fn new_local_flush(
+        buffer_pool: HeapBufferPool,
+        flush_queue: WriterFlushQueue,
+        writer_id: usize,
+    ) -> Self {
+        Self::new(buffer_pool, LocalCursor::new(WriterFlusher::new(flush_queue)), writer_id)
+    }
+}
+
+impl Writer<LocalCursor<NoopFlusher>> {
+    pub fn new_local_noflush(
+        buffer_pool: HeapBufferPool,
+        writer_id: usize,
+    ) -> Self {
+        Self::new(buffer_pool, LocalCursor::new(NoopFlusher), writer_id)
+    }
+}
+
+impl<Cursor: sealed::WriterCursor> Writer<Cursor> {
+    fn new(
+        buffer_pool: HeapBufferPool,
+        cursor: Cursor,
+        writer_id: usize,
+    ) -> Self {
+        if buffer_pool.buffer_size() as u64 > CURSOR_OFFSET_MASK + 1 {
+            panic!("Writers do not support buffers larger than {} bytes", CURSOR_OFFSET_MASK + 1);
+        }
+
         Self {
             inner: Arc::new(WriterInner {
                 writer_id,
                 buffer_pool: buffer_pool,
-                cursor: Cursor::default(),
-                flusher: WriterFlusher::new(flush_queue),
+                cursor,
                 switch_buffer_waiters: WaiterQueue::new(),
             }),
         }
@@ -434,9 +564,7 @@ impl<Cursor: sealed::WriterCursor + Default> Writer<Cursor> {
 
 impl<Cursor: sealed::WriterCursor + 'static> Writer<Cursor> {
     pub fn to_dyn(self) -> DynWriter {
-        Writer {
-            inner: self.inner.clone(),
-        }
+        Writer { inner: self.inner }
     }
 }
 
@@ -526,12 +654,12 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                     // task to notify the flusher and switch the buffer.
 
                     let prev_buffer = self.inner.buffer_pool.buffer_by_id(buf_index);
-                    self.inner.cursor.finish_buffer(prev_buffer);
-                    self.inner.flusher.advance_write_cursor(
+                    self.inner.cursor.advance_write_cursor(
                         prev_buffer,
                         offset,
                         offset | WRITE_CURSOR_DONE,
                     );
+                    self.inner.cursor.finish_buffer(prev_buffer);
 
                     // When we swap the buffer we allocate space on the new buffer simultaneously.
                     let next_buf_index = self.inner.switch_buffer(len as u32).await;
@@ -561,7 +689,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
     }
 
     pub fn flush(&self) {
-        self.inner.flusher.flush();
+        self.inner.cursor.flush();
     }
 }
 
@@ -613,7 +741,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> AsRef<[u8]> for Write<'_, Cursor> {
 
 impl<Cursor: sealed::WriterCursor + ?Sized> Drop for Write<'_, Cursor> {
     fn drop(&mut self) {
-        self.writer.inner.flusher.advance_write_cursor(
+        self.writer.inner.cursor.advance_write_cursor(
             self.buffer,
             self.offset,
             (self.offset + self.len) | if self.is_buffer_done { WRITE_CURSOR_DONE } else { 0 },
@@ -635,7 +763,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> From<Write<'_, Cursor>> for crate::P
             write.writer.inner.cursor.take_ref(write.buffer);
         }
 
-        write.writer.inner.flusher.advance_write_cursor(
+        write.writer.inner.cursor.advance_write_cursor(
             write.buffer,
             write.offset,
             (write.offset + write.len) | if write.is_buffer_done { WRITE_CURSOR_DONE } else { 0 },
