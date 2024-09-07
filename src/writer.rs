@@ -1,8 +1,6 @@
 use core::{
     cell::Cell,
-    pin::Pin,
     sync::atomic::{AtomicU64, Ordering},
-    task::{Context, Poll, Waker},
 };
 
 #[cfg(feature = "std")]
@@ -10,225 +8,31 @@ use std::sync::Arc;
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
 
-use crossbeam_utils::{Backoff, CachePadded};
-use spin::Mutex;
+use crossbeam_utils::CachePadded;
 
 use crate::{
-    buffer::BufferPtr,
-    thread_local::ThreadLocal,
-    waiter_queue::WaiterQueue,
-    HeapBufferPool,
+    buffer::BufferPtr, waiter_queue::WaiterQueue,
+    writer_flush::{
+        WRITE_CURSOR_DONE,
+        WriterFlushSender,
+    },
+    HeapBufferPool
 };
-
-pub const WRITE_CURSOR_FLUSHED_FLAG: u32 = 0x8000_0000;
-pub const WRITE_CURSOR_DONE:         u32 = 0x4000_0000;
-pub const WRITE_CURSOR_MASK:         u32 = 0x3FFF_FFFF;
-
-
-#[derive(Default)]
-struct WriterFlusherLocal {
-    head_tail: Cell<Option<(BufferPtr, BufferPtr)>>,
-}
-
-struct WriterFlushQueueInner {
-    head_tail: Option<(BufferPtr, BufferPtr)>,
-    waker: Option<Waker>,
-}
-
-#[derive(Clone)]
-pub struct WriterFlushQueue {
-    inner: Arc<Mutex<WriterFlushQueueInner>>,
-}
-
-impl WriterFlushQueue {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(WriterFlushQueueInner {
-                head_tail: None,
-                waker: None,
-            })),
-        }
-    }
-
-    pub fn send(&self, append_head: BufferPtr, append_tail: BufferPtr) {
-        let mut flush_queue = self.inner.lock();
-        if let Some((_, prev_shared_tail)) = &mut flush_queue.head_tail {
-            unsafe { prev_shared_tail.set_next(Some(append_head)); }
-            *prev_shared_tail = append_tail;
-        } else {
-            flush_queue.head_tail = Some((append_head, append_tail));
-            if let Some(waker) = &flush_queue.waker {
-                waker.wake_by_ref();
-            }
-        }
-    }
-
-    pub async fn receive(&self) -> BufferPtr {
-        WriterFlushQueueReceive { flush_queue: self }.await
-    }
-
-    pub fn try_receive(&self) -> Option<BufferPtr> {
-        let mut flush_queue = self.inner.lock();
-        flush_queue.try_receive()
-    }
-}
-
-impl WriterFlushQueueInner {
-    pub fn try_receive(&mut self) -> Option<BufferPtr> {
-        self.head_tail.take().map(|(head, _tail)| head)
-    }
-}
-
-impl Drop for WriterFlushQueueInner {
-    fn drop(&mut self) {
-        let mut recv_head = self.try_receive();
-
-        while let Some(buffer) = recv_head {
-            // SAFETY: we have exclusive access until we set `WRITE_CURSOR_FLUSHED_FLAG` on the
-            // buffer's write_cursor, which we don't do in this case since no future flushes can
-            // occur.
-            recv_head = unsafe { buffer.swap_next(None) };
-
-            let flush_cursor = unsafe { buffer.flush_cursor_mut() };
-
-            if *flush_cursor == 0 {
-                unsafe { buffer.receive(1); }
-            }
-
-            *flush_cursor = 0;
-            unsafe { buffer.release_ref(1); }
-        }
-    }
-}
-
-struct WriterFlushQueueReceive<'a> {
-    flush_queue: &'a WriterFlushQueue,
-}
-
-impl core::future::Future for WriterFlushQueueReceive<'_> {
-    type Output = BufferPtr;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut flush_queue = self.flush_queue.inner.lock();
-        if let Some((head, _tail)) = flush_queue.head_tail.take() {
-            flush_queue.waker = None;
-            Poll::Ready(head)
-        } else {
-            let new_waker = cx.waker();
-            if let Some(existing_waker) = &flush_queue.waker {
-                if !existing_waker.will_wake(new_waker) {
-                    flush_queue.waker = Some(new_waker.clone());
-                }
-            } else {
-                flush_queue.waker = Some(new_waker.clone());
-            }
-
-            Poll::Pending
-        }
-    }
-}
-
-impl Drop for WriterFlushQueueReceive<'_> {
-    fn drop(&mut self) {
-        let mut flush_queue = self.flush_queue.inner.lock();
-        flush_queue.waker = None;
-    }
-}
-
-// A niche concurrent linked-list datastructure to track write/flush progress on a set of buffers.
-// - Multi producer, single consumer
-// - Writers only append to the end of the list.
-// - Single consumer is free to remove items anywhere in the list.
-//     - After unlinking a buffer from the list, the consumer sets a bit on the buffer's
-//       `write_cursor` indicating that the buffer was flushed and should be re-added to the flush
-//       list if any subsequent writes occur.
-pub struct WriterFlusher {
-    flush_queue: WriterFlushQueue,
-    local: ThreadLocal<CachePadded<WriterFlusherLocal>>,
-}
-
-impl WriterFlusher {
-    pub fn new(flush_queue: WriterFlushQueue) -> Self {
-        Self {
-            flush_queue,
-            local: ThreadLocal::new(),
-        }
-    }
-
-    pub fn flush(&self) {
-        let local = self.local.get_or_default();
-
-        let Some((local_head, local_tail)) = local.head_tail.replace(None) else {
-            return;
-        };
-
-        self.flush_queue.send(local_head, local_tail);
-    }
-
-    pub fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        // Wait for previous writes to finish.
-        let backoff = Backoff::new();
-        let mut write_cursor = buffer.write_cursor().load(Ordering::Acquire);
-        while write_cursor & WRITE_CURSOR_MASK != write_start {
-            backoff.snooze();
-            write_cursor = buffer.write_cursor().load(Ordering::Acquire);
-        }
-        loop {
-            match buffer.write_cursor().compare_exchange(
-                write_cursor,
-                new_write_cursor,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    break;
-                }
-                Err(modified_write_cursor) => {
-                    // Must've been modified the the flusher
-                    write_cursor = modified_write_cursor;
-                    assert_eq!(write_cursor & WRITE_CURSOR_MASK, write_start);
-                }
-            }
-        }
-
-        if write_start == 0 {
-            assert!(write_cursor & WRITE_CURSOR_FLUSHED_FLAG == 0);
-        }
-
-        if write_start == 0 || write_cursor & WRITE_CURSOR_FLUSHED_FLAG != 0 {
-            // This is the first write since the buffer was last flushed - add it to the flush
-            // queue.
-            let local = self.local.get_or_default();
-            if let Some((prev_head, prev_tail)) = local.head_tail.get() {
-                unsafe { prev_tail.set_next(Some(buffer)); }
-                local.head_tail.set(Some((prev_head, buffer)));
-            } else {
-                local.head_tail.set(Some((buffer, buffer)));
-            }
-        }
-    }
-}
-
-impl Drop for WriterFlusher {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
 
 pub type DynWriter = Writer<dyn sealed::WriterCursor>;
 pub type SharedWriter = Writer<SharedCursor>;
-pub type LocalWriter = Writer<LocalCursor<WriterFlusher>>;
+pub type LocalWriter = Writer<LocalCursor<WriterFlushSender>>;
 pub type LocalWriterNoFlush = Writer<LocalCursor<NoopFlusher>>;
 
-pub struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
+pub struct Writer<Cursor: sealed::WriterCursor + ?Sized> {
+    inner: Arc<WriterInner<Cursor>>,
+}
+
+struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
     writer_id: usize,
     buffer_pool: HeapBufferPool,
     switch_buffer_waiters: WaiterQueue<()>,
     cursor: Cursor,
-}
-
-pub struct Writer<Cursor: sealed::WriterCursor + ?Sized> {
-    inner: Arc<WriterInner<Cursor>>,
 }
 
 const CURSOR_INIT: u64        = 0x8000_0000_0000_0000;
@@ -336,19 +140,19 @@ impl Default for NoopFlusher {
     fn default() -> Self { Self }
 }
 
-impl sealed::Flusher for WriterFlusher {
+impl sealed::Flusher for WriterFlushSender {
     fn flush(&self) {
-        WriterFlusher::flush(self);
+        WriterFlushSender::flush(self);
     }
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        WriterFlusher::advance_write_cursor(self, buffer, write_start, new_write_cursor);
+        WriterFlushSender::advance_write_cursor(self, buffer, write_start, new_write_cursor);
     }
 }
 
 pub struct SharedCursor {
     cursor: CachePadded<AtomicU64>,
-    flusher: WriterFlusher,
+    flusher: WriterFlushSender,
 }
 
 impl sealed::WriterCursor for SharedCursor {
@@ -397,10 +201,10 @@ impl sealed::WriterCursor for SharedCursor {
 }
 
 impl SharedCursor {
-    fn new(flush_queue: WriterFlushQueue) -> Self {
+    fn new(flusher: WriterFlushSender) -> Self {
         Self {
             cursor: CachePadded::new(AtomicU64::new(CURSOR_INIT)),
-            flusher: WriterFlusher::new(flush_queue),
+            flusher,
         }
     }
 }
@@ -410,7 +214,7 @@ pub struct LocalCursor<Flusher> {
     flusher: Flusher,
 }
 
-impl sealed::WriterCursor for LocalCursor<WriterFlusher> {
+impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
     fn get(&self) -> u64 {
         self.cursor.get()
     }
@@ -515,20 +319,20 @@ impl<Flusher> LocalCursor<Flusher> {
 impl Writer<SharedCursor> {
     pub fn new_shared(
         buffer_pool: HeapBufferPool,
-        flush_queue: WriterFlushQueue,
+        flusher: WriterFlushSender,
         writer_id: usize,
     ) -> Self {
-        Self::new(buffer_pool, SharedCursor::new(flush_queue), writer_id)
+        Self::new(buffer_pool, SharedCursor::new(flusher), writer_id)
     }
 }
 
-impl Writer<LocalCursor<WriterFlusher>> {
+impl Writer<LocalCursor<WriterFlushSender>> {
     pub fn new_local_flush(
         buffer_pool: HeapBufferPool,
-        flush_queue: WriterFlushQueue,
+        flusher: WriterFlushSender,
         writer_id: usize,
     ) -> Self {
-        Self::new(buffer_pool, LocalCursor::new(WriterFlusher::new(flush_queue)), writer_id)
+        Self::new(buffer_pool, LocalCursor::new(flusher), writer_id)
     }
 }
 

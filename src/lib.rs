@@ -10,17 +10,20 @@ extern crate alloc;
 pub use buffer::BufferPtr;
 pub use buffer_pool::{BufferPool, HeapBufferPool};
 pub use packet::{Packet, SendPacket};
-pub use write_flusher::{WriteFlusher, Flush};
 pub use framer::Framer;
 pub use signal::Signal;
 pub use thread_local::ThreadLocal;
-pub use writer::{DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter, Writer, WriterFlushQueue};
+pub use writer::{
+    DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter,
+    Writer,
+};
+pub use writer_flush::{Flush, WriterFlushReceiver, WriterFlushSender, new_writer_flusher};
 
 mod buffer;
 mod buffer_pool;
 mod free_stack;
 mod packet;
-mod write_flusher;
+mod writer_flush;
 mod framer;
 mod signal;
 pub mod thread_id;

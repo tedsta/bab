@@ -137,7 +137,7 @@ impl BufferPtr {
         let local = unsafe { &*buffer.buffer_pool }.local();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
-        let prev_local_rc= buffer_local.ref_count.replace(buffer_local.ref_count.get() + 1);
+        let prev_local_rc = buffer_local.ref_count.replace(buffer_local.ref_count.get() + 1);
         buffer_local.shared_rc_contribution.set(
             buffer_local.shared_rc_contribution.get() + shared_rc_contribution
         );
