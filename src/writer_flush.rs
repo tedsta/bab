@@ -24,6 +24,7 @@ use spin::Mutex;
 use crate::{
     buffer::BufferPtr,
     thread_local::ThreadLocal,
+    Packet,
 };
 
 pub const WRITE_CURSOR_FLUSHED_FLAG: u32 = 0x8000_0000;
@@ -51,13 +52,13 @@ struct WriterFlushShared {
 
 impl Drop for WriterFlushShared {
     fn drop(&mut self) {
-        let mut recv_head = self.head_tail.take().map(|(head, _tail)| head);
+        let mut release_head = self.head_tail.take().map(|(head, _tail)| head);
 
-        while let Some(buffer) = recv_head {
+        while let Some(buffer) = release_head {
             // SAFETY: we have exclusive access until we set `WRITE_CURSOR_FLUSHED_FLAG` on the
             // buffer's write_cursor, which we don't do in this case since no future flushes can
             // occur.
-            recv_head = unsafe { buffer.swap_next(None) };
+            release_head = unsafe { buffer.swap_next(None) };
 
             unsafe {
                 *buffer.flush_cursor_mut() = 0;
@@ -87,13 +88,13 @@ impl WriterFlushSender {
             return;
         };
 
-        let mut flush_queue = self.shared.lock();
-        if let Some((_, prev_shared_tail)) = &mut flush_queue.head_tail {
+        let mut shared = self.shared.lock();
+        if let Some((_, prev_shared_tail)) = &mut shared.head_tail {
             unsafe { prev_shared_tail.set_next(Some(local_head)); }
             *prev_shared_tail = local_tail;
         } else {
-            flush_queue.head_tail = Some((local_head, local_tail));
-            if let Some(waker) = &flush_queue.waker {
+            shared.head_tail = Some((local_head, local_tail));
+            if let Some(waker) = &shared.waker {
                 waker.wake_by_ref();
             }
         }
@@ -125,10 +126,6 @@ impl WriterFlushSender {
             }
         }
 
-        if write_start == 0 {
-            assert!(write_cursor & WRITE_CURSOR_FLUSHED_FLAG == 0);
-        }
-
         if write_start == 0 || write_cursor & WRITE_CURSOR_FLUSHED_FLAG != 0 {
             // This is the first write since the buffer was last flushed - add it to the flush
             // queue.
@@ -144,25 +141,25 @@ impl WriterFlushSender {
 }
 
 struct WriterFlushQueueReceive<'a> {
-    flush_queue: &'a Mutex<WriterFlushShared>,
+    shared: &'a Mutex<WriterFlushShared>,
 }
 
 impl core::future::Future for WriterFlushQueueReceive<'_> {
     type Output = BufferPtr;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut flush_queue = self.flush_queue.lock();
-        if let Some((head, _tail)) = flush_queue.head_tail.take() {
-            flush_queue.waker = None;
+        let mut shared = self.shared.lock();
+        if let Some((head, _tail)) = shared.head_tail.take() {
+            shared.waker = None;
             Poll::Ready(head)
         } else {
             let new_waker = cx.waker();
-            if let Some(existing_waker) = &flush_queue.waker {
+            if let Some(existing_waker) = &shared.waker {
                 if !existing_waker.will_wake(new_waker) {
-                    flush_queue.waker = Some(new_waker.clone());
+                    shared.waker = Some(new_waker.clone());
                 }
             } else {
-                flush_queue.waker = Some(new_waker.clone());
+                shared.waker = Some(new_waker.clone());
             }
 
             Poll::Pending
@@ -172,8 +169,8 @@ impl core::future::Future for WriterFlushQueueReceive<'_> {
 
 impl Drop for WriterFlushQueueReceive<'_> {
     fn drop(&mut self) {
-        let mut flush_queue = self.flush_queue.lock();
-        flush_queue.waker = None;
+        let mut shared = self.shared.lock();
+        shared.waker = None;
     }
 }
 
@@ -206,7 +203,7 @@ impl WriterFlushReceiver {
     }
 
     pub async fn flush(&mut self) -> FlushIterator {
-        let recv_head = WriterFlushQueueReceive { flush_queue: &self.shared }.await;
+        let recv_head = WriterFlushQueueReceive { shared: &self.shared }.await;
         FlushIterator { head: Some(recv_head) }
     }
 }
@@ -293,5 +290,33 @@ impl Drop for Flush {
                 self.buffer.release_ref(1);
             }
         }
+    }
+}
+
+impl From<Flush> for Packet {
+    fn from(flush: Flush) -> Self {
+        if flush.release_buffer {
+            unsafe {
+                *flush.buffer.flush_cursor_mut() = 0;
+                flush.buffer.receive(1);
+            }
+        } else {
+            // In theory we could convert this to a regular `take_ref` if we `receive`'d the buffer
+            // the first time the flush receiver encounters the buffer rather than just before
+            // releasing its buffer reference. But doing that greatly complicates the shutdown
+            // logic, (mainly releasing unflushed buffers at the senders) and I haven't been able to
+            // find a reasonable solution yet.
+            unsafe { flush.buffer.take_shared_ref(1); }
+        }
+
+        let packet = Self::new(
+            flush.buffer,
+            flush.offset as usize,
+            flush.len as usize,
+        );
+
+        core::mem::forget(flush);
+
+        packet
     }
 }
