@@ -15,7 +15,7 @@ pub use signal::Signal;
 pub use thread_local::ThreadLocal;
 pub use writer::{
     DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter,
-    Writer,
+    Write, Writer,
 };
 pub use writer_flush::{Flush, WriterFlushReceiver, WriterFlushSender, new_writer_flusher};
 

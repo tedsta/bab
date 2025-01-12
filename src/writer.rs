@@ -16,7 +16,8 @@ use crate::{
         WRITE_CURSOR_DONE,
         WriterFlushSender,
     },
-    HeapBufferPool
+    HeapBufferPool,
+    Packet,
 };
 
 pub type DynWriter = Writer<dyn sealed::WriterCursor>;
@@ -559,7 +560,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Drop for Write<'_, Cursor> {
     }
 }
 
-impl<Cursor: sealed::WriterCursor + ?Sized> From<Write<'_, Cursor>> for crate::Packet {
+impl<Cursor: sealed::WriterCursor + ?Sized> From<Write<'_, Cursor>> for Packet {
     fn from(write: Write<'_, Cursor>) -> Self {
         if write.offset > 0 {
             // Only take a ref if it's not the first write to the buffer - the ref for the first

@@ -2,7 +2,7 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
-use crossbeam_utils::{atomic::AtomicCell, Backoff};
+use crossbeam_utils::Backoff;
 
 use crate::buffer::{Buffer, BufferPtr};
 
@@ -14,7 +14,6 @@ pub struct FreeStack {
 
 impl FreeStack {
     pub fn new(capacity: usize) -> Self {
-        assert!(AtomicCell::<Option<BufferPtr>>::is_lock_free());
         Self {
             slots: (0..capacity).map(|_| AtomicPtr::new(core::ptr::null_mut()))
                 .collect::<Vec<_>>()
