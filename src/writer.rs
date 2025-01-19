@@ -14,6 +14,7 @@ use crate::{
     buffer::BufferPtr, waiter_queue::WaiterQueue,
     writer_flush::{
         WRITE_CURSOR_DONE,
+        WRITE_CURSOR_MASK,
         WriterFlushSender,
     },
     HeapBufferPool,
@@ -211,6 +212,10 @@ impl SharedCursor {
 }
 
 pub struct LocalCursor<Flusher> {
+    last_flush_cursor: Cell<u32>,
+    advance_cursor: Cell<u32>,
+    current_buffer: Cell<Option<BufferPtr>>,
+
     cursor: Cell<u64>,
     flusher: Flusher,
 }
@@ -225,9 +230,21 @@ impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
         // 2 shared refs: 1 for the writer, one for the flusher
         unsafe { next_buffer.initialize_rc(2, 1, 2); }
         self.cursor.set(v);
+
+        self.last_flush_cursor.set(0);
+        self.advance_cursor.set(0);
+        debug_assert!(self.current_buffer.get().is_none());
+        self.current_buffer.set(Some(next_buffer));
     }
 
     fn finish_buffer(&self, prev_buffer: BufferPtr) {
+        self.flusher.advance_write_cursor(
+            prev_buffer,
+            self.last_flush_cursor.get(),
+            self.advance_cursor.get(),
+        );
+        self.current_buffer.set(None);
+
         unsafe {
             prev_buffer.release_ref(1);
         }
@@ -254,11 +271,22 @@ impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
     }
 
     fn flush(&self) {
+        if let Some(current_buffer) = self.current_buffer.get() {
+            self.flusher.advance_write_cursor(
+                current_buffer,
+                self.last_flush_cursor.get(),
+                self.advance_cursor.get(),
+            );
+            self.last_flush_cursor.set(self.advance_cursor.get());
+        }
+
         self.flusher.flush();
     }
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
+        debug_assert_eq!(self.current_buffer.get(), Some(buffer));
+        debug_assert_eq!(self.advance_cursor.get() & WRITE_CURSOR_MASK, write_start);
+        self.advance_cursor.set(new_write_cursor);
     }
 }
 
@@ -311,6 +339,9 @@ impl sealed::WriterCursor for LocalCursor<NoopFlusher> {
 impl<Flusher> LocalCursor<Flusher> {
     fn new(flusher: Flusher) -> Self {
         Self {
+            advance_cursor: Cell::new(0),
+            last_flush_cursor: Cell::new(0),
+            current_buffer: Cell::new(None),
             cursor: Cell::new(CURSOR_INIT),
             flusher,
         }
@@ -451,9 +482,12 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
             } else {
                 let latest_cursor = cursor + len as u64;
 
-                if (offset as usize) < buffer_size &&
-                    offset as usize + len >= buffer_size
-                {
+                if offset as usize + len < buffer_size {
+                    // Allocation on current buffer successful.
+                    use_buf_index = buf_index;
+                    use_offset = offset;
+                    debug_assert!(use_offset > 0);
+                } else if (offset as usize) < buffer_size {
                     // This task tipped the buffer over the limit, so a new buffer needs to be
                     // swapped in. The task that tips the buffer over the limit is the designated
                     // task to notify the flusher and switch the buffer.
@@ -470,15 +504,10 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                     let next_buf_index = self.inner.switch_buffer(len as u32).await;
                     use_buf_index = next_buf_index;
                     use_offset = 0;
-                } else if offset as usize + len >= buffer_size {
+                } else {
                     // Wait for buffer to be swapped.
                     self.inner.wait_for_buffer(latest_cursor).await;
                     continue;
-                } else {
-                    // Allocation on current buffer successful.
-                    use_buf_index = buf_index;
-                    use_offset = offset;
-                    assert!(use_offset > 0);
                 }
             }
 

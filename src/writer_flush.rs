@@ -100,8 +100,12 @@ impl WriterFlushSender {
         }
     }
 
-    pub(crate) fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        // Wait for previous writes to finish.
+    pub(crate) fn advance_write_cursor(
+        &self,
+        buffer: BufferPtr,
+        write_start: u32,
+        new_write_cursor: u32,
+    ) {
         let backoff = Backoff::new();
         let mut write_cursor = buffer.write_cursor().load(Ordering::Acquire);
         while write_cursor & WRITE_CURSOR_MASK != write_start {
