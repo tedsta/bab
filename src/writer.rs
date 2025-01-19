@@ -68,6 +68,21 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
         unsafe { next_buffer.id() }
     }
 
+    fn try_switch_buffer(&self, initial_offset: u32) -> Option<u32> {
+        let next_buffer = self.buffer_pool.try_acquire()?;
+        next_buffer.writer_id().store(self.writer_id, Ordering::Relaxed);
+        next_buffer.write_cursor().store(0, Ordering::Release);
+
+        let wanted_cursor =
+            ((unsafe { next_buffer.id() } as u64) << CURSOR_BUF_SHIFT) |
+            initial_offset as u64;
+
+        self.cursor.start_buffer(wanted_cursor, next_buffer);
+        self.switch_buffer_waiters.lock().notify_all(());
+
+        Some(unsafe { next_buffer.id() })
+    }
+
     async fn wait_for_buffer(&self, cursor: u64) {
         let prev_buf_index = cursor & CURSOR_BUF_MASK;
 
@@ -520,6 +535,105 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                 is_buffer_done: false,
             };
         }
+    }
+
+    pub fn try_reserve(&self, len: usize) -> Option<Write<Cursor>> {
+        let buffer_size = self.inner.buffer_pool.buffer_size();
+        if len > buffer_size {
+            panic!("packet too big! len={} max={}", len, buffer_size);
+        }
+
+        if len > buffer_size / 2 {
+            // Big reservation - just grab a dedicated buffer for this one.
+            let buffer = self.inner.buffer_pool.try_acquire()?;
+            buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+            buffer.write_cursor().store(0, Ordering::Release);
+
+            unsafe { buffer.initialize_rc(1, 1, 2); }
+
+            return Some(Write {
+                writer: self,
+                buffer,
+                offset: 0,
+                len: len as u32,
+                is_buffer_done: true,
+            });
+        }
+
+        // Try to allocate in current buffer
+        let cursor = self.inner.cursor.try_reserve(len as u64);
+        let is_uninitialized = (cursor & CURSOR_INIT) != 0;
+        let buf_index = ((cursor & CURSOR_BUF_MASK) >> CURSOR_BUF_SHIFT) as u32;
+        let offset = (cursor & CURSOR_OFFSET_MASK) as u32;
+
+        let use_buf_index: u32;
+        let use_offset: u32;
+
+        assert!(offset + len as u32 <= CURSOR_OFFSET_MASK as u32);
+
+        if is_uninitialized {
+            let prev_cursor = self.inner.cursor.try_init();
+            let prev_buf_index = ((prev_cursor & CURSOR_BUF_MASK) >> CURSOR_BUF_SHIFT) as u32;
+            let latest_cursor = prev_cursor | CLAIM_CURSOR_INIT;
+
+            if prev_cursor & CLAIM_CURSOR_INIT == 0 {
+                // This task is designated to acquire the initial buffer.
+                let Some(next_buf_index) = self.inner.try_switch_buffer(len as u32) else {
+                    // Force next reserver to re-initialize the writer.
+                    self.inner.cursor.release_buffer();
+                    return None;
+                };
+
+                use_buf_index = next_buf_index;
+                use_offset = 0;
+            } else {
+                assert_eq!(prev_buf_index, 0);
+                // Wait for initial buffer.
+                return None;
+            }
+        } else {
+            let latest_cursor = cursor + len as u64;
+
+            if offset as usize + len < buffer_size {
+                // Allocation on current buffer successful.
+                use_buf_index = buf_index;
+                use_offset = offset;
+                debug_assert!(use_offset > 0);
+            } else if (offset as usize) < buffer_size {
+                // This task tipped the buffer over the limit, so a new buffer needs to be
+                // swapped in. The task that tips the buffer over the limit is the designated
+                // task to notify the flusher and switch the buffer.
+
+                let prev_buffer = self.inner.buffer_pool.buffer_by_id(buf_index);
+                self.inner.cursor.advance_write_cursor(
+                    prev_buffer,
+                    offset,
+                    offset | WRITE_CURSOR_DONE,
+                );
+                self.inner.cursor.finish_buffer(prev_buffer);
+
+                // When we swap the buffer we allocate space on the new buffer simultaneously.
+                let Some(next_buf_index) = self.inner.try_switch_buffer(len as u32) else {
+                    // Force next reserver to re-initialize the writer.
+                    self.inner.cursor.release_buffer();
+                    return None;
+                };
+                use_buf_index = next_buf_index;
+                use_offset = 0;
+            } else {
+                // Wait for buffer to be swapped.
+                return None;
+            }
+        }
+
+        let buffer = self.inner.buffer_pool.buffer_by_id(use_buf_index);
+        Some(Write {
+            writer: self,
+            buffer,
+            offset: use_offset,
+            len: len as u32,
+            is_buffer_done: false,
+        })
     }
 
     pub fn flush(&self) {
