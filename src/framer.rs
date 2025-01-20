@@ -1,82 +1,50 @@
 use crate::{
     buffer::BufferPtr,
     packet::Packet,
+    BufferWriter,
     HeapBufferPool,
 };
 
 pub struct Framer {
-    buffer_pool: HeapBufferPool,
-    write_cursor: Option<FramerCursor>,
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct FramerCursor {
-    buffer: BufferPtr,
-    start: usize,
-    end: usize,
-    buffer_done: bool,
+    buffer_writer: BufferWriter,
+    frame_start: usize,
 }
 
 impl Framer {
     pub fn new(buffer_pool: HeapBufferPool) -> Self {
         Self {
-            buffer_pool,
-            write_cursor: None,
+            buffer_writer: BufferWriter::new(buffer_pool),
+            frame_start: 0,
         }
     }
 
+    #[inline]
     pub async fn write(&mut self) -> &mut [u8] {
-        let write_cursor =
-            match &mut self.write_cursor {
-                Some(write_cursor) => write_cursor,
-                write_cursor @ None => {
-                    // Get next buffer
-                    let buffer = self.buffer_pool.acquire().await;
-                    *write_cursor = Some(FramerCursor {
-                        buffer,
-                        start: 0,
-                        end: 0,
-                        buffer_done: false,
-                    });
-                    write_cursor.as_ref().unwrap()
-                }
-            };
-
-        let offset = write_cursor.end;
-
-        unsafe {
-            core::slice::from_raw_parts_mut(
-                write_cursor.buffer.data().add(offset),
-                self.buffer_pool.buffer_size() - offset,
-            )
-        }
+        self.buffer_writer.write().await
     }
 
+    #[inline]
+    pub fn try_write(&mut self) -> Option<&mut [u8]> {
+        self.buffer_writer.try_write()
+    }
+
+    #[inline]
     pub fn remaining_on_buffer(&self) -> usize {
-        let Some(write_cursor) = self.write_cursor.as_ref() else {
-            // XXX is this what we want? Maybe should return None to make it explicit that we don't
-            // have a buffer yet?
-            return self.buffer_pool.buffer_size();
-        };
-
-        self.buffer_pool.buffer_size() - write_cursor.end
+        self.buffer_writer.remaining_on_buffer()
     }
 
+    #[inline]
     pub fn commit(&mut self, len: usize) {
-        let Some(write_cursor) = self.write_cursor.as_mut() else {
-            panic!("Framer::commit called without initial write on buffer.");
-        };
-
-        write_cursor.end += len;
+        self.buffer_writer.commit(len)
     }
 
     #[inline]
     pub fn finish_frame(&mut self) -> Option<Packet> {
-        let write_cursor = self.write_cursor.as_mut()?;
+        let (buffer, written_len) = self.buffer_writer.state()?;
 
-        if write_cursor.end != write_cursor.start {
-            let packet = Self::produce_packet(*write_cursor);
-            write_cursor.start = write_cursor.end;
+        if written_len != self.frame_start {
+            let packet = Self::produce_packet(buffer, self.frame_start, written_len, false);
+            self.frame_start = written_len;
             Some(packet)
         } else {
             None
@@ -85,29 +53,34 @@ impl Framer {
 
     #[inline]
     pub fn next_buffer(&mut self) -> Option<Packet> {
-        let mut write_cursor = self.write_cursor.take()?;
+        let (buffer, written_len) = self.buffer_writer.next_buffer()?;
 
-        if write_cursor.end != write_cursor.start {
-            write_cursor.buffer_done = true;
-
-            Some(Self::produce_packet(write_cursor))
+        if written_len != self.frame_start {
+            let packet_start = self.frame_start;
+            self.frame_start = 0;
+            Some(Self::produce_packet(buffer, packet_start, written_len, true))
         } else {
             // No new messages were written since the last call to `finish_frame` - decrement the
             // reference count on the current buffer.
-            if write_cursor.start == 0 {
+            if self.frame_start == 0 {
                 // No messages were written on this buffer at all, so the reference count was never
                 // initialized.
-                unsafe { write_cursor.buffer.initialize_rc(1, 0, 0); }
+                unsafe { buffer.initialize_rc(1, 0, 0); }
             }
 
-            unsafe { write_cursor.buffer.release_ref(1); }
+            unsafe { buffer.release_ref(1); }
 
             None
         }
     }
 
     #[inline]
-    fn produce_packet(written: FramerCursor) -> Packet {
+    fn produce_packet(
+        buffer: BufferPtr,
+        packet_start: usize,
+        packet_end: usize,
+        buffer_done: bool,
+    ) -> Packet {
         // Four scenarios to handle when updating the buffer's reference count:
         // 1. It's the first and only message on the buffer - set the reference count to 1.
         // 2. It's the first message of potentially multiple on the buffer - set the reference count
@@ -118,25 +91,25 @@ impl Framer {
         // 4. It's the last of multiple messages on the buffer - don't modify the reference count.
         //    The decrement we'd do since we are switching buffers cancels out with the increment
         //    for the new message.
-        if written.start == 0 {
-            if written.buffer_done {
+        if packet_start == 0 {
+            if buffer_done {
                 // Scenario 1
-                unsafe { written.buffer.initialize_rc(1, 0, 0); }
+                unsafe { buffer.initialize_rc(1, 0, 0); }
             } else {
                 // Scenario 2
-                unsafe { written.buffer.initialize_rc(2, 0, 0); }
+                unsafe { buffer.initialize_rc(2, 0, 0); }
             }
-        } else if !written.buffer_done {
+        } else if !buffer_done {
             // Scenario 3
-            unsafe { written.buffer.take_ref(1); }
+            unsafe { buffer.take_ref(1); }
         } else {
             // Scenario 4 - do nothing
         }
 
         Packet::new(
-            written.buffer,
-            written.start,
-            written.end - written.start,
+            buffer,
+            packet_start,
+            packet_end - packet_start,
         )
     }
 }

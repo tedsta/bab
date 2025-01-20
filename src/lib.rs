@@ -10,6 +10,7 @@ extern crate alloc;
 pub use buffer::BufferPtr;
 pub use buffer_chain::{BufferChain, BufferChainDrain};
 pub use buffer_pool::{BufferPool, HeapBufferPool};
+pub use buffer_writer::BufferWriter;
 pub use packet::{Packet, SendPacket};
 pub use framer::Framer;
 pub use signal::Signal;
@@ -23,6 +24,7 @@ pub use writer_flush::{Flush, WriterFlushReceiver, WriterFlushSender, new_writer
 mod buffer;
 mod buffer_chain;
 mod buffer_pool;
+mod buffer_writer;
 mod free_stack;
 mod packet;
 mod writer_flush;

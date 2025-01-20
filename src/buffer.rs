@@ -30,6 +30,22 @@ impl BufferPtr {
         Buffer::data(self.ptr.as_ptr())
     }
 
+    #[inline]
+    pub unsafe fn slice(&self, range: core::ops::Range<usize>) -> &[u8] {
+        core::slice::from_raw_parts(
+            self.data().add(range.start),
+            range.end - range.start,
+        )
+    }
+
+    #[inline]
+    pub unsafe fn slice_mut(&self, range: core::ops::Range<usize>) -> &mut [u8] {
+        core::slice::from_raw_parts_mut(
+            self.data().add(range.start),
+            range.end - range.start,
+        )
+    }
+
     /// SAFETY: this method must not be called concurrently from multiple threads.
     pub unsafe fn set_next(&self, next: Option<Self>) {
         unsafe {
