@@ -7,7 +7,6 @@
 //       list if any subsequent writes occur.
 
 use core::{
-    cell::Cell,
     pin::Pin,
     sync::atomic::Ordering,
     task::{Context, Poll, Waker},
@@ -24,6 +23,7 @@ use spin::Mutex;
 use crate::{
     buffer::BufferPtr,
     thread_local::ThreadLocal,
+    BufferChain,
     Packet,
 };
 
@@ -38,7 +38,7 @@ pub fn new_writer_flusher() -> (WriterFlushSender, WriterFlushReceiver) {
     }));
     let writer_flush_sender = WriterFlushSender {
         shared: shared.clone(),
-        local: Arc::new(ThreadLocal::new()),
+        local_chain: Arc::new(ThreadLocal::new()),
     };
     let writer_flush_receiver = WriterFlushReceiver::new(shared);
 
@@ -72,19 +72,14 @@ impl Drop for WriterFlushShared {
 #[derive(Clone)]
 pub struct WriterFlushSender {
     shared: Arc<Mutex<WriterFlushShared>>,
-    local: Arc<ThreadLocal<CachePadded<WriterFlushSenderLocal>>>,
-}
-
-#[derive(Default)]
-struct WriterFlushSenderLocal {
-    head_tail: Cell<Option<(BufferPtr, BufferPtr)>>,
+    local_chain: Arc<ThreadLocal<CachePadded<BufferChain>>>,
 }
 
 impl WriterFlushSender {
     pub fn flush(&self) {
-        let local = self.local.get_or_default();
+        let local_chain = self.local_chain.get_or_default();
 
-        let Some((local_head, local_tail)) = local.head_tail.replace(None) else {
+        let Some((local_head, local_tail)) = local_chain.take_all() else {
             return;
         };
 
@@ -133,13 +128,8 @@ impl WriterFlushSender {
         if write_start == 0 || write_cursor & WRITE_CURSOR_FLUSHED_FLAG != 0 {
             // This is the first write since the buffer was last flushed - add it to the flush
             // queue.
-            let local = self.local.get_or_default();
-            if let Some((prev_head, prev_tail)) = local.head_tail.get() {
-                unsafe { prev_tail.set_next(Some(buffer)); }
-                local.head_tail.set(Some((prev_head, buffer)));
-            } else {
-                local.head_tail.set(Some((buffer, buffer)));
-            }
+            let local_chain = self.local_chain.get_or_default();
+            local_chain.push(buffer);
         }
     }
 }
