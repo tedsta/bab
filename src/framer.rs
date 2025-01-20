@@ -25,10 +25,8 @@ impl Framer {
         }
     }
 
-    // Returned WriteHandle commits the bytes when it is dropped.
     pub async fn write(&mut self) -> &mut [u8] {
         let write_cursor =
-            // XXX If only there were a Option::get_or_insert_with_async
             match &mut self.write_cursor {
                 Some(write_cursor) => write_cursor,
                 write_cursor @ None => {
@@ -64,7 +62,7 @@ impl Framer {
         self.buffer_pool.buffer_size() - write_cursor.end
     }
 
-    pub fn commit<'a>(&mut self, len: usize) {
+    pub fn commit(&mut self, len: usize) {
         let Some(write_cursor) = self.write_cursor.as_mut() else {
             panic!("Framer::commit called without initial write on buffer.");
         };
@@ -72,7 +70,8 @@ impl Framer {
         write_cursor.end += len;
     }
 
-    pub fn finish_frame<'a>(&mut self) -> Option<Packet> {
+    #[inline]
+    pub fn finish_frame(&mut self) -> Option<Packet> {
         let write_cursor = self.write_cursor.as_mut()?;
 
         if write_cursor.end != write_cursor.start {
@@ -84,7 +83,8 @@ impl Framer {
         }
     }
 
-    pub fn next_buffer<'a>(&mut self) -> Option<Packet> {
+    #[inline]
+    pub fn next_buffer(&mut self) -> Option<Packet> {
         let mut write_cursor = self.write_cursor.take()?;
 
         if write_cursor.end != write_cursor.start {
@@ -106,6 +106,7 @@ impl Framer {
         }
     }
 
+    #[inline]
     fn produce_packet(written: FramerCursor) -> Packet {
         // Four scenarios to handle when updating the buffer's reference count:
         // 1. It's the first and only message on the buffer - set the reference count to 1.

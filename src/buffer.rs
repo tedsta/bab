@@ -147,6 +147,7 @@ impl BufferPtr {
         }
     }
 
+    #[inline]
     pub unsafe fn take_ref(&self, count: u32) -> u32 {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();

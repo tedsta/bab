@@ -68,6 +68,7 @@ impl Local {
         })
     }
 
+    #[inline]
     pub(crate) fn local_buffer_state(&self, buffer_id: usize) -> &LocalBufferState {
         unsafe {
             &*core::ptr::addr_of!((*self.local_buffer_state)[buffer_id])
@@ -147,6 +148,7 @@ impl BufferPool {
         }
     }
 
+    #[inline]
     pub(crate) fn local(&self) -> &Local {
         self.local.get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
     }
