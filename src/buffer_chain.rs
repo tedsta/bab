@@ -13,6 +13,12 @@ pub struct BufferChain {
 }
 
 impl BufferChain {
+    pub fn new() -> Self {
+        Self {
+            head_tail: Cell::new(None),
+        }
+    }
+
     /// Insert a single buffer at the end of this chain.
     ///
     /// A buffer can only appear once in a single BufferChain. This method will panic if the

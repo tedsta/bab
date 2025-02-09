@@ -106,11 +106,13 @@ impl Framer {
             // Scenario 4 - do nothing
         }
 
-        Packet::new(
-            buffer,
-            packet_start,
-            packet_end - packet_start,
-        )
+        unsafe {
+            Packet::new(
+                buffer,
+                packet_start,
+                packet_end - packet_start,
+            )
+        }
     }
 }
 

@@ -78,6 +78,13 @@ impl BufferWriter {
         self.buffer_pool.buffer_size() - write_cursor.end
     }
 
+    pub fn is_empty(&self) -> bool {
+        let Some(write_cursor) = self.write_cursor.as_ref() else {
+            return true;
+        };
+        write_cursor.end == 0
+    }
+
     pub fn commit(&mut self, len: usize) {
         let Some(write_cursor) = self.write_cursor.as_mut() else {
             panic!("BufferWriter::commit called without initial write on buffer.");

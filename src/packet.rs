@@ -12,7 +12,7 @@ pub struct Packet {
 }
 
 impl Packet {
-    pub(crate) fn new(buffer: BufferPtr, offset: usize, len: usize) -> Self {
+    pub unsafe fn new(buffer: BufferPtr, offset: usize, len: usize) -> Self {
         Self {
             buffer,
             offset: Cell::new(offset as u32),

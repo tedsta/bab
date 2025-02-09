@@ -79,16 +79,16 @@ impl WriterFlushSender {
     pub fn flush(&self) {
         let local_chain = self.local_chain.get_or_default();
 
-        let Some((local_head, local_tail)) = local_chain.take_all() else {
+        let Some((head, tail)) = local_chain.take_all() else {
             return;
         };
 
         let mut shared = self.shared.lock();
         if let Some((_, prev_shared_tail)) = &mut shared.head_tail {
-            unsafe { prev_shared_tail.set_next(Some(local_head)); }
-            *prev_shared_tail = local_tail;
+            unsafe { prev_shared_tail.set_next(Some(head)); }
+            *prev_shared_tail = tail;
         } else {
-            shared.head_tail = Some((local_head, local_tail));
+            shared.head_tail = Some((head, tail));
             if let Some(waker) = &shared.waker {
                 waker.wake_by_ref();
             }
@@ -131,6 +131,41 @@ impl WriterFlushSender {
             let local_chain = self.local_chain.get_or_default();
             local_chain.push(buffer);
         }
+    }
+
+    /// Enqueue a complete buffer to be sent toward the WriterFlushReceiver upon the next call to
+    /// `flush`.
+    ///
+    /// The buffer must previously have been been marked via `mark_complete_buffer`.
+    pub fn send_complete_buffer(&self, buffer: BufferPtr) {
+        let flush_cursor = unsafe { buffer.flush_cursor_mut() };
+        let len = core::mem::replace(flush_cursor, 0);
+
+        buffer.write_cursor().store(len | WRITE_CURSOR_DONE, Ordering::Release);
+
+        let local_chain = self.local_chain.get_or_default();
+        local_chain.push(buffer);
+    }
+
+    /// Prepare a buffer to be flushed without actually flushing it.
+    ///
+    /// This is a low-level operation that allows preparing written buffers externally (not
+    /// using a `bab::Writer`) and sending them to the WriterFlushReceiver via
+    /// `send_complete_buffer`.
+    pub fn mark_complete_buffer(buffer: BufferPtr, len: u32) {
+        // A bit of a hack - since we will only be sending this buffer to a flush receiver once, for
+        // we have exclusive access to its flush_cursor and use it to store the buffer's wrtten
+        // length so that users don't have to track it separately.
+        // We just need to be sure to reset flush_cursor to 0 before it gets sent to the flush
+        // receiver. We do this in `send_complete_buffer`.
+        let flush_cursor = unsafe { buffer.flush_cursor_mut() };
+        *flush_cursor = len;
+    }
+
+    /// Get the written length of a complete buffer previously marked via `mark_complete_buffer`.
+    pub fn get_complete_buffer_len(buffer: BufferPtr) -> u32 {
+        let flush_cursor = unsafe { buffer.flush_cursor_mut() };
+        *flush_cursor
     }
 }
 
@@ -303,11 +338,13 @@ impl From<Flush> for Packet {
             unsafe { flush.buffer.take_shared_ref(1); }
         }
 
-        let packet = Self::new(
-            flush.buffer,
-            flush.offset as usize,
-            flush.len as usize,
-        );
+        let packet = unsafe {
+            Self::new(
+                flush.buffer,
+                flush.offset as usize,
+                flush.len as usize,
+            )
+        };
 
         core::mem::forget(flush);
 

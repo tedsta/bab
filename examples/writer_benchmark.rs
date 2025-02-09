@@ -6,20 +6,21 @@ use std::{
 use core_affinity::CoreId;
 
 fn main() {
-    let message_size = 60;
+    let message_size = 32;
     let write_payload: Vec<u8> = (0u16..message_size as _).map(|i| (i % 200) as u8).collect();
-    let batch_size = 1000;
+    let batch_size = 300000;
 
-    let thread_count = 2;
-    let iter_count = 30000000;
+    let thread_count = 1;
+    let iter_count = 300000000;
 
     let flushed_bytes = Rc::new(Cell::new(0));
 
-    let buffer_size = 1350;
-    let buffer_pool = bab::HeapBufferPool::new(buffer_size, 128, 256);
+    let buffer_size = 256 * 1024;
+    let buffer_tailroom = 0;
+    let buffer_pool = bab::HeapBufferPool::new(buffer_size, 4, 1024);
     let (flush_sender, mut flush_receiver) = bab::new_writer_flusher();
 
-    let writer = bab::Writer::new_shared(buffer_pool.clone(), flush_sender.clone(), 0);
+    //let writer = bab::Writer::new_shared(buffer_pool.clone(), buffer_tailroom, flush_sender.clone(), 0);
     for thread_id in 0..thread_count {
         //let writer = writer.clone(); // writers all using same buffer
         let buffer_pool = buffer_pool.clone();
@@ -31,21 +32,33 @@ fn main() {
             // each writer gets its own buffer
             let writer = bab::Writer::new_local_flush(
                 buffer_pool.clone(),
+                buffer_tailroom,
                 flush_sender,
                 0,
             );
 
-            let writer = writer.to_dyn();
+            //let writer = writer.to_dyn();
 
             let _buffer_pool_thread_guard = buffer_pool.register_thread();
+
+            let writer_start_time = std::time::Instant::now();
 
             let mut sent_messages = 0;
             pollster::block_on(async {
                 for _ in 0..(iter_count / batch_size / thread_count) {
                     for _ in 0..batch_size {
-                        let mut write_buf = writer.reserve(write_payload.len()).await;
+                        //let mut write_buf = writer.reserve(write_payload.len()).await;
+                        let mut write_buf = writer.try_reserve(write_payload.len()).unwrap();
                         write_buf[..].copy_from_slice(&write_payload);
-                        let _: bab::Packet = write_buf.into();
+                        //let _: bab::Packet = write_buf.into();
+                        
+                        /*loop {
+                            let Some(mut write_buf) = writer.try_reserve(write_payload.len()) else {
+                                continue;
+                            };
+                            write_buf[..].copy_from_slice(&write_payload);
+                            break;
+                        }*/
 
                         sent_messages += 1;
                     };
@@ -55,9 +68,11 @@ fn main() {
             });
 
             println!("Writer thread finished {}", thread_id);
+            let ns_per_iter = writer_start_time.elapsed().as_nanos() / (iter_count / thread_count) as u128;
+            println!("Writer ns per message: {}", ns_per_iter);
         });
     }
-    drop(writer);
+    //drop(writer);
 
     core_affinity::set_for_current(CoreId { id: 0 });
 
@@ -88,8 +103,12 @@ fn main() {
                 );
                 next_progress += expected_message_count / 100;
             }
+
+            std::thread::yield_now();
         }
     });
+    drop(flush_receiver);
+    drop(flush_sender);
 
     let ns_per_iter = start_time.elapsed().as_nanos() / iter_count as u128;
     println!("ns per message flush: {}", ns_per_iter);

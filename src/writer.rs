@@ -32,6 +32,7 @@ pub struct Writer<Cursor: sealed::WriterCursor + ?Sized> {
 
 struct WriterInner<Cursor: sealed::WriterCursor + ?Sized> {
     writer_id: usize,
+    max_buffer_size: usize,
     buffer_pool: HeapBufferPool,
     switch_buffer_waiters: WaiterQueue<()>,
     cursor: Cursor,
@@ -90,13 +91,13 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
             let cursor = self.cursor.get();
             let buf_index = cursor & CURSOR_BUF_MASK;
             let offset = (cursor & CURSOR_OFFSET_MASK) as u32;
-            buf_index != prev_buf_index || offset < self.buffer_pool.buffer_size() as u32
+            buf_index != prev_buf_index || offset < self.max_buffer_size as u32
         })
         .await;
     }
 
     fn release_buffer(&self) {
-        let buffer_size = self.buffer_pool.buffer_size();
+        let buffer_size = self.max_buffer_size;
 
         let cursor = self.cursor.release_buffer();
         let buffer_id = ((cursor & CURSOR_BUF_MASK) >> CURSOR_BUF_SHIFT) as u32;
@@ -142,6 +143,8 @@ mod sealed {
         fn flush(&self);
 
         fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32);
+
+        fn send_complete_buffer(&self, buffer: BufferPtr);
     }
 }
 
@@ -214,6 +217,10 @@ impl sealed::WriterCursor for SharedCursor {
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
         self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
+    }
+
+    fn send_complete_buffer(&self, buffer: BufferPtr) {
+        self.flusher.send_complete_buffer(buffer);
     }
 }
 
@@ -303,6 +310,10 @@ impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
         debug_assert_eq!(self.advance_cursor.get() & WRITE_CURSOR_MASK, write_start);
         self.advance_cursor.set(new_write_cursor);
     }
+
+    fn send_complete_buffer(&self, buffer: BufferPtr) {
+        self.flusher.send_complete_buffer(buffer);
+    }
 }
 
 impl sealed::WriterCursor for LocalCursor<NoopFlusher> {
@@ -349,6 +360,8 @@ impl sealed::WriterCursor for LocalCursor<NoopFlusher> {
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
         sealed::Flusher::advance_write_cursor(&self.flusher, buffer, write_start, new_write_cursor);
     }
+
+    fn send_complete_buffer(&self, _buffer: BufferPtr) { }
 }
 
 impl<Flusher> LocalCursor<Flusher> {
@@ -366,41 +379,55 @@ impl<Flusher> LocalCursor<Flusher> {
 impl Writer<SharedCursor> {
     pub fn new_shared(
         buffer_pool: HeapBufferPool,
+        buffer_tailroom: usize,
         flusher: WriterFlushSender,
         writer_id: usize,
     ) -> Self {
-        Self::new(buffer_pool, SharedCursor::new(flusher), writer_id)
+        Self::new(buffer_pool, buffer_tailroom, SharedCursor::new(flusher), writer_id)
     }
 }
 
 impl Writer<LocalCursor<WriterFlushSender>> {
     pub fn new_local_flush(
         buffer_pool: HeapBufferPool,
+        buffer_tailroom: usize,
         flusher: WriterFlushSender,
         writer_id: usize,
     ) -> Self {
-        Self::new(buffer_pool, LocalCursor::new(flusher), writer_id)
+        Self::new(buffer_pool, buffer_tailroom, LocalCursor::new(flusher), writer_id)
     }
 }
 
 impl Writer<LocalCursor<NoopFlusher>> {
     pub fn new_local_noflush(
         buffer_pool: HeapBufferPool,
+        buffer_tailroom: usize,
         writer_id: usize,
     ) -> Self {
-        Self::new(buffer_pool, LocalCursor::new(NoopFlusher), writer_id)
+        Self::new(buffer_pool, buffer_tailroom, LocalCursor::new(NoopFlusher), writer_id)
     }
 }
 
 impl<Cursor: sealed::WriterCursor> Writer<Cursor> {
     fn new(
         buffer_pool: HeapBufferPool,
+        buffer_tailroom: usize,
         cursor: Cursor,
         writer_id: usize,
     ) -> Self {
-        if buffer_pool.buffer_size() as u64 > CURSOR_OFFSET_MASK + 1 {
+        let mut max_buffer_size = buffer_pool.buffer_size();
+        if max_buffer_size as u64 > CURSOR_OFFSET_MASK + 1 {
             panic!("Writers do not support buffers larger than {} bytes", CURSOR_OFFSET_MASK + 1);
         }
+
+        if buffer_tailroom >= max_buffer_size {
+            panic!(
+                "bab::Writer buffer_tailroom can't be larger than the buffers themselves - tailroom={} buffer_size={}",
+                buffer_tailroom,
+                max_buffer_size,
+            );
+        }
+        max_buffer_size -= buffer_tailroom;
 
         Self {
             inner: Arc::new(WriterInner {
@@ -408,6 +435,7 @@ impl<Cursor: sealed::WriterCursor> Writer<Cursor> {
                 buffer_pool: buffer_pool,
                 cursor,
                 switch_buffer_waiters: WaiterQueue::new(),
+                max_buffer_size,
             }),
         }
     }
@@ -443,7 +471,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
     /// longer than it needs to be is a performance concern because it can hold up other threads
     /// that are using the writer.
     pub async fn reserve(&self, len: usize) -> Write<Cursor> {
-        let buffer_size = self.inner.buffer_pool.buffer_size();
+        let buffer_size = self.inner.max_buffer_size;
         if len > buffer_size {
             panic!("packet too big! len={} max={}", len, buffer_size);
         }
@@ -538,7 +566,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
     }
 
     pub fn try_reserve(&self, len: usize) -> Option<Write<Cursor>> {
-        let buffer_size = self.inner.buffer_pool.buffer_size();
+        let buffer_size = self.inner.max_buffer_size;
         if len > buffer_size {
             panic!("packet too big! len={} max={}", len, buffer_size);
         }
@@ -636,6 +664,20 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
         })
     }
 
+    pub fn ingest_complete_buffer(&self, buffer: BufferPtr, len: usize) -> Packet {
+        buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+
+        // 1 local ref + local shared contribution for the returned packet
+        // 2 shared refs: 1 for packet + 1 for the flush receiver
+        unsafe { buffer.initialize_rc(1, 1, 2); }
+
+        let packet = unsafe { Packet::new(buffer, 0, len) };
+
+        self.inner.cursor.send_complete_buffer(buffer);
+
+        packet
+    }
+
     pub fn flush(&self) {
         self.inner.cursor.flush();
     }
@@ -717,11 +759,13 @@ impl<Cursor: sealed::WriterCursor + ?Sized> From<Write<'_, Cursor>> for Packet {
             (write.offset + write.len) | if write.is_buffer_done { WRITE_CURSOR_DONE } else { 0 },
         );
 
-        let packet = Self::new(
-            write.buffer,
-            write.offset as usize,
-            write.len as usize,
-        );
+        let packet = unsafe {
+            Self::new(
+                write.buffer,
+                write.offset as usize,
+                write.len as usize,
+            )
+        };
 
         core::mem::forget(write);
 
