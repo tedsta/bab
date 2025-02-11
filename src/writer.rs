@@ -213,9 +213,7 @@ impl sealed::WriterCursor for SharedCursor {
         self.cursor.swap(CURSOR_INIT, Ordering::Relaxed)
     }
 
-    fn flush(&self) {
-        self.flusher.flush();
-    }
+    fn flush(&self) { }
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
         self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
@@ -305,8 +303,6 @@ impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
                 self.last_flush_cursor.set(self.advance_cursor.get());
             }
         }
-
-        self.flusher.flush();
     }
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {

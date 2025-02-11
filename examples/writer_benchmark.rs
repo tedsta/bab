@@ -33,7 +33,7 @@ fn main() {
             let writer = bab::Writer::new_local_flush(
                 buffer_pool.clone(),
                 buffer_tailroom,
-                flush_sender,
+                flush_sender.clone(),
                 0,
             );
 
@@ -64,6 +64,7 @@ fn main() {
                     };
 
                     writer.flush();
+                    flush_sender.flush();
                 }
             });
 
