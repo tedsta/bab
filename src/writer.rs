@@ -113,6 +113,8 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
             );
             self.cursor.finish_buffer(buffer);
         }
+
+        self.switch_buffer_waiters.lock().notify_all(());
     }
 }
 
@@ -294,21 +296,29 @@ impl sealed::WriterCursor for LocalCursor<WriterFlushSender> {
 
     fn flush(&self) {
         if let Some(current_buffer) = self.current_buffer.get() {
-            self.flusher.advance_write_cursor(
-                current_buffer,
-                self.last_flush_cursor.get(),
-                self.advance_cursor.get(),
-            );
-            self.last_flush_cursor.set(self.advance_cursor.get());
+            if self.advance_cursor.get() != self.last_flush_cursor.get() {
+                self.flusher.advance_write_cursor(
+                    current_buffer,
+                    self.last_flush_cursor.get(),
+                    self.advance_cursor.get(),
+                );
+                self.last_flush_cursor.set(self.advance_cursor.get());
+            }
         }
 
         self.flusher.flush();
     }
 
     fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        debug_assert_eq!(self.current_buffer.get(), Some(buffer));
-        debug_assert_eq!(self.advance_cursor.get() & WRITE_CURSOR_MASK, write_start);
-        self.advance_cursor.set(new_write_cursor);
+        if Some(buffer) == self.current_buffer.get() {
+            debug_assert_eq!(self.advance_cursor.get() & WRITE_CURSOR_MASK, write_start);
+
+            // Defer advancing the write cursor until we flush.
+            self.advance_cursor.set(new_write_cursor);
+        } else {
+            // It's not the buffer tracked by this cursor
+            self.flusher.advance_write_cursor(buffer, write_start, new_write_cursor);
+        }
     }
 
     fn send_complete_buffer(&self, buffer: BufferPtr) {
@@ -608,7 +618,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                 // This task is designated to acquire the initial buffer.
                 let Some(next_buf_index) = self.inner.try_switch_buffer(len as u32) else {
                     // Force next reserver to re-initialize the writer.
-                    self.inner.cursor.release_buffer();
+                    self.inner.release_buffer();
                     return None;
                 };
 
@@ -643,7 +653,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                 // When we swap the buffer we allocate space on the new buffer simultaneously.
                 let Some(next_buf_index) = self.inner.try_switch_buffer(len as u32) else {
                     // Force next reserver to re-initialize the writer.
-                    self.inner.cursor.release_buffer();
+                    self.inner.release_buffer();
                     return None;
                 };
                 use_buf_index = next_buf_index;
