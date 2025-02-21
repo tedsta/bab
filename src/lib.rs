@@ -14,6 +14,8 @@ pub use buffer_writer::BufferWriter;
 pub use packet::{Packet, SendPacket};
 pub use framer::Framer;
 pub use signal::Signal;
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use signal::SignalTree;
 pub use thread_local::ThreadLocal;
 pub use writer::{
     DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter,
