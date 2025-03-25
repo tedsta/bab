@@ -16,6 +16,10 @@ static THREAD_ID: Cell<ThreadId> = Cell::new(ThreadId::uninitialized());
 pub struct ThreadId(u32);
 
 impl ThreadId {
+    pub fn current() -> Self {
+        current()
+    }
+
     const fn uninitialized() -> Self { Self(u32::MAX) }
 
     fn next() -> Self {
