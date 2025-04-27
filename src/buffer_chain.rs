@@ -54,7 +54,7 @@ impl core::iter::Iterator for BufferChainDrain {
     type Item = BufferPtr;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while let Some(buffer) = self.head {
+        if let Some(buffer) = self.head {
             self.head = unsafe { buffer.swap_next(None) };
             return Some(buffer);
         }
