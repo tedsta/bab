@@ -37,6 +37,10 @@ impl Packet {
 
     pub fn len(&self) -> usize { self.len.get() as usize }
 
+    pub fn set_len(&self, new_len: usize) {
+        self.len.set(new_len as u32);
+    }
+
     pub fn advance(&self, n: usize) {
         let n = n as u32;
         assert!(self.len.get() >= n);
