@@ -67,6 +67,16 @@ impl BufferPtr {
         }
     }
 
+    /// Release this buffer back to the pool it was acquired from.
+    ///
+    /// SAFETY: you must have exclusive access to this buffer.
+    pub unsafe fn release(self) {
+        let buffer = self.as_ref();
+        let buffer_pool_ptr = buffer.buffer_pool;
+        let buffer_pool = unsafe { &*buffer_pool_ptr };
+        unsafe { buffer_pool.release(self); }
+    }
+
     /// You must ensure that you have exclusive access to the reference count of the buffer - that
     /// no other threads try to take or release references to this buffer between this buffer being
     /// acquired from the pool and the call to this method.
