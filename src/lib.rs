@@ -10,12 +10,17 @@ extern crate alloc;
 pub use buffer::BufferPtr;
 pub use buffer_chain::{BufferChain, BufferChainDrain};
 pub use buffer_pool::{BufferPool, HeapBufferPool};
+pub use buffer_queue::{
+    BufferQueueSender, BufferQueueReceiver, BufferQueueReceiveIterator,
+    buffer_queue,
+};
 pub use buffer_writer::BufferWriter;
 pub use packet::{Packet, SendPacket};
 pub use framer::Framer;
 pub use signal::Signal;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use signal::SignalTree;
+pub use thread_id::ThreadId;
 pub use thread_local::ThreadLocal;
 pub use writer::{
     DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter,
@@ -26,6 +31,7 @@ pub use writer_flush::{Flush, WriterFlushReceiver, WriterFlushSender, new_writer
 mod buffer;
 mod buffer_chain;
 mod buffer_pool;
+mod buffer_queue;
 mod buffer_writer;
 mod free_stack;
 mod packet;
