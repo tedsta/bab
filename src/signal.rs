@@ -27,6 +27,10 @@ impl Signal {
         self.is_notified.load(Ordering::Relaxed)
     }
 
+    pub fn reset(&self) {
+        self.is_notified.store(false, Ordering::Relaxed);
+    }
+
     pub fn notify(&self) {
         self.is_notified.store(true, Ordering::Relaxed);
         self.waiter_queue.lock().notify_all(());
