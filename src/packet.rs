@@ -78,6 +78,8 @@ impl Packet {
     }
 }
 
+impl core::marker::Unpin for Packet { }
+
 impl core::ops::Deref for Packet {
     type Target = [u8];
 
