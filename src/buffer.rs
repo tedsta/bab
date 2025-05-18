@@ -67,6 +67,16 @@ impl BufferPtr {
         }
     }
 
+    /// SAFETY: you must have exclusive access to this buffer.
+    pub unsafe fn writer_id(&self) -> usize {
+        self.as_ref().writer_id.load(Ordering::Relaxed)
+    }
+
+    /// SAFETY: you must have exclusive access to this buffer.
+    pub unsafe fn set_writer_id(&self, writer_id: usize) {
+        self.as_ref().writer_id.store(writer_id, Ordering::Relaxed);
+    }
+
     /// Release this buffer back to the pool it was acquired from.
     ///
     /// SAFETY: you must have exclusive access to this buffer.
@@ -279,12 +289,6 @@ impl BufferPtr {
     // make BufferPtr a proper owned handle.
     pub(crate) fn write_cursor(&self) -> &AtomicU32 {
         &self.as_ref().write_cursor
-    }
-
-    // Technically unsafe but it's only used internally and we can eventually make it safe if we
-    // make BufferPtr a proper owned handle.
-    pub(crate) fn writer_id(&self) -> &AtomicUsize {
-        &self.as_ref().writer_id
     }
 
     pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 {

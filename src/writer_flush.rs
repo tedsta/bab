@@ -252,7 +252,7 @@ impl core::iter::Iterator for FlushIterator {
 
             let write_cursor = buffer.write_cursor()
                 .fetch_or(WRITE_CURSOR_FLUSHED_FLAG, Ordering::AcqRel);
-            let writer_id = buffer.writer_id().load(Ordering::Relaxed);
+            let writer_id = unsafe { buffer.writer_id() };
 
             let flush_cursor = unsafe { buffer.flush_cursor_mut() };
             let buffer_is_done = (write_cursor & WRITE_CURSOR_DONE) != 0;

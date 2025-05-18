@@ -56,7 +56,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Clone for Writer<Cursor> {
 impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
     async fn switch_buffer(&self, initial_offset: u32) -> u32 {
         let next_buffer = self.buffer_pool.acquire().await;
-        next_buffer.writer_id().store(self.writer_id, Ordering::Relaxed);
+        unsafe { next_buffer.set_writer_id(self.writer_id); }
         next_buffer.write_cursor().store(0, Ordering::Release);
 
         let wanted_cursor =
@@ -71,7 +71,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
 
     fn try_switch_buffer(&self, initial_offset: u32) -> Option<u32> {
         let next_buffer = self.buffer_pool.try_acquire()?;
-        next_buffer.writer_id().store(self.writer_id, Ordering::Relaxed);
+        unsafe { next_buffer.set_writer_id(self.writer_id); }
         next_buffer.write_cursor().store(0, Ordering::Release);
 
         let wanted_cursor =
@@ -485,7 +485,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
         if len > buffer_size / 2 {
             // Big reservation - just grab a dedicated buffer for this one.
             let buffer = self.inner.buffer_pool.acquire().await;
-            buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+            unsafe { buffer.set_writer_id(self.inner.writer_id); }
             buffer.write_cursor().store(0, Ordering::Release);
 
             unsafe { buffer.initialize_rc(1, 1, 2); }
@@ -580,7 +580,7 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
         if len > buffer_size / 2 {
             // Big reservation - just grab a dedicated buffer for this one.
             let buffer = self.inner.buffer_pool.try_acquire()?;
-            buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+            unsafe { buffer.set_writer_id(self.inner.writer_id); }
             buffer.write_cursor().store(0, Ordering::Release);
 
             unsafe { buffer.initialize_rc(1, 1, 2); }
@@ -671,11 +671,20 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
     }
 
     pub fn ingest_complete_buffer(&self, buffer: BufferPtr, len: usize) -> Packet {
-        buffer.writer_id().store(self.inner.writer_id, Ordering::Relaxed);
+        unsafe { buffer.set_writer_id(self.inner.writer_id); }
 
-        // 1 local ref + local shared contribution for the returned packet
-        // 2 shared refs: 1 for packet + 1 for the flush receiver
-        unsafe { buffer.initialize_rc(1, 1, 2); }
+        if buffer.get_local_rc() == 0 {
+            // 1 local ref + local shared contribution for the returned packet
+            // 2 shared refs: 1 for packet + 1 for the flush receiver
+            unsafe { buffer.initialize_rc(1, 1, 2); }
+        } else {
+            // Buffer is already being reference counted. Tack on new references for the returned
+            // Packet and the flush receiver.
+            unsafe {
+                buffer.take_ref(2); // 1 for the packet, 1 for the flush receiver
+                buffer.send(); // send 1 ref to the flush receiver
+            }
+        }
 
         let packet = unsafe { Packet::new(buffer, 0, len) };
 
