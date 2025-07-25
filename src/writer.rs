@@ -608,7 +608,6 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
         if is_uninitialized {
             let prev_cursor = self.inner.cursor.try_init();
             let prev_buf_index = ((prev_cursor & CURSOR_BUF_MASK) >> CURSOR_BUF_SHIFT) as u32;
-            let latest_cursor = prev_cursor | CLAIM_CURSOR_INIT;
 
             if prev_cursor & CLAIM_CURSOR_INIT == 0 {
                 // This task is designated to acquire the initial buffer.
@@ -626,8 +625,6 @@ impl<Cursor: sealed::WriterCursor + ?Sized> Writer<Cursor> {
                 return None;
             }
         } else {
-            let latest_cursor = cursor + len as u64;
-
             if offset as usize + len < buffer_size {
                 // Allocation on current buffer successful.
                 use_buf_index = buf_index;
