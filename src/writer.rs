@@ -121,12 +121,6 @@ impl<Cursor: sealed::WriterCursor + ?Sized> WriterInner<Cursor> {
 mod sealed {
     use crate::BufferPtr;
 
-    pub trait Flusher {
-        fn flush(&self);
-
-        fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32);
-    }
-
     pub trait WriterCursor {
         fn get(&self) -> u64;
 
@@ -152,24 +146,8 @@ mod sealed {
 
 pub struct NoopFlusher;
 
-impl sealed::Flusher for NoopFlusher {
-    fn flush(&self) { }
-
-    fn advance_write_cursor(&self, _buffer: BufferPtr, _write_start: u32, _new_write_cursor: u32) { }
-}
-
 impl Default for NoopFlusher {
     fn default() -> Self { Self }
-}
-
-impl sealed::Flusher for WriterFlushSender {
-    fn flush(&self) {
-        WriterFlushSender::flush(self);
-    }
-
-    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        WriterFlushSender::advance_write_cursor(self, buffer, write_start, new_write_cursor);
-    }
 }
 
 pub struct SharedCursor {
@@ -359,13 +337,9 @@ impl sealed::WriterCursor for LocalCursor<NoopFlusher> {
         self.cursor.replace(CURSOR_INIT)
     }
 
-    fn flush(&self) {
-        sealed::Flusher::flush(&self.flusher);
-    }
+    fn flush(&self) { }
 
-    fn advance_write_cursor(&self, buffer: BufferPtr, write_start: u32, new_write_cursor: u32) {
-        sealed::Flusher::advance_write_cursor(&self.flusher, buffer, write_start, new_write_cursor);
-    }
+    fn advance_write_cursor(&self, _buffer: BufferPtr, _write_start: u32, _new_write_cursor: u32) { }
 
     fn send_complete_buffer(&self, _buffer: BufferPtr) { }
 }
