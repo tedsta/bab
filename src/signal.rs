@@ -3,10 +3,11 @@ use std::sync::{Arc, Weak};
 #[cfg(feature = "alloc")]
 use alloc::sync::{Arc, Weak};
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
-#[cfg(any(feature = "std", feature = "alloc"))]
-use crossbeam_utils::atomic::AtomicCell;
 use waitq::WaiterQueue;
 
 pub struct Signal {
@@ -49,9 +50,8 @@ impl Signal {
 struct SignalTreeNode {
     signal: Signal,
     children_head_tail: spin::Mutex<Option<(Arc<Self>, Arc<Self>)>>,
-    // TODO - we always lock the parent's children_head_tail when accessing next_sibling,
-    // so with some care we can probably switch this to an UnsafeCell instead of AtomicCell.
-    next_sibling: AtomicCell<Option<Arc<Self>>>,
+    // SAFETY: the parent's children_head_tail must be locked while accessing a node's next_sibling.
+    next_sibling: UnsafeCell<Option<Arc<Self>>>,
     parent: spin::Mutex<SignalTreeNodeParent>,
 }
 
@@ -71,7 +71,8 @@ impl SignalTreeNode {
         while let Some(child) = next_child {
             child.parent.lock().parent = Weak::new();
             child.notify();
-            next_child = child.next_sibling.take();
+            // SAFETY: self is the parent, we currently have `self.children_head_tail.lock()`.
+            next_child = core::mem::replace(unsafe { &mut *child.next_sibling.get() }, None);
         }
     }
 
@@ -81,16 +82,19 @@ impl SignalTreeNode {
             return;
         };
 
+        let mut parent_children_head_tail = parent_node.children_head_tail.lock();
+
         // Remove this node from the chain of siblings
-        let next_sibling = self.next_sibling.take();
+        // SAFETY: we currently have `parent_node.children_head_tail.lock()`.
+        let next_sibling = core::mem::replace(unsafe { &mut *self.next_sibling.get() }, None);
         let previous_sibling = parent.previous_sibling.upgrade();
         if let Some(previous_sibling) = &previous_sibling {
-            previous_sibling.next_sibling.store(next_sibling.clone());
+            // SAFETY: we currently have `parent_node.children_head_tail.lock()`.
+            unsafe { *previous_sibling.next_sibling.get() = next_sibling.clone(); }
         }
 
         // If this node is the head or tail sibling, update the parent's head/tail children
         // pointers.
-        let mut parent_children_head_tail = parent_node.children_head_tail.lock();
         if let Some((head, tail)) = parent_children_head_tail.as_mut() {
             let is_head = Arc::as_ptr(head) == self as *const Self;
             let is_tail = Arc::as_ptr(tail) == self as *const Self;
@@ -126,7 +130,7 @@ impl SignalTree {
             node: Arc::new(SignalTreeNode {
                 signal: Signal::new(),
                 children_head_tail: spin::Mutex::new(None),
-                next_sibling: AtomicCell::new(None),
+                next_sibling: UnsafeCell::new(None),
                 parent: spin::Mutex::new(SignalTreeNodeParent {
                     parent: Weak::new(),
                     previous_sibling: Weak::new(),
@@ -161,10 +165,13 @@ impl SignalTree {
             child_parent.previous_sibling = Arc::downgrade(&tail);
             drop(child_parent);
 
-            assert!(
-                tail.next_sibling.swap(Some(child.node.clone()))
-                    .is_none()
+            // SAFETY: we currently have `parent_node.children_head_tail.lock()`.
+            let previus_tail_next = core::mem::replace(
+                unsafe { &mut *tail.next_sibling.get() },
+                Some(child.node.clone()),
             );
+            debug_assert!(previus_tail_next.is_none());
+
             *tail = child.node;
         } else {
             child_parent.parent = Arc::downgrade(&self.node);

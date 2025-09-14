@@ -601,9 +601,9 @@ checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
 name = "waitq"
-version = "0.0.1"
+version = "0.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21e0df905c14563bb33544f12b159ca3b4017db058d381b7a50cbfdaa9c995ef"
+checksum = "8e302202d34070b20e4097f8db1e17cdf281bd86bcf53cd8a5288a3465e41d92"
 dependencies = [
  "spin",
  "thid",
