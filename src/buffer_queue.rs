@@ -3,19 +3,16 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-#[cfg(feature = "std")]
-use std::sync::Arc;
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use crossbeam_utils::CachePadded;
 use spin::Mutex;
 use thid::ThreadLocal;
 
-use crate::{
-    buffer::BufferPtr,
-    buffer_chain::BufferChain,
-};
+use crate::{buffer::BufferPtr, buffer_chain::BufferChain};
 
 pub fn buffer_queue() -> (BufferQueueSender, BufferQueueReceiver) {
     let shared = Arc::new(Mutex::new(BufferQueueShared {
@@ -57,7 +54,9 @@ impl BufferQueueSender {
 
         let mut shared = self.shared.lock();
         if let Some((_, prev_shared_tail)) = &mut shared.head_tail {
-            unsafe { prev_shared_tail.set_next(Some(head)); }
+            unsafe {
+                prev_shared_tail.set_next(Some(head));
+            }
             *prev_shared_tail = tail;
         } else {
             shared.head_tail = Some((head, tail));
@@ -114,17 +113,18 @@ pub struct BufferQueueReceiver {
 }
 
 impl BufferQueueReceiver {
-    fn new(
-        shared: Arc<Mutex<BufferQueueShared>>,
-    ) -> Self {
-        Self {
-            shared,
-        }
+    fn new(shared: Arc<Mutex<BufferQueueShared>>) -> Self {
+        Self { shared }
     }
 
     pub async fn recv(&self) -> BufferQueueReceiveIterator {
-        let recv_head = BufferQueueReceive { shared: &self.shared }.await;
-        BufferQueueReceiveIterator { head: Some(recv_head) }
+        let recv_head = BufferQueueReceive {
+            shared: &self.shared,
+        }
+        .await;
+        BufferQueueReceiveIterator {
+            head: Some(recv_head),
+        }
     }
 }
 
@@ -147,7 +147,6 @@ impl core::iter::Iterator for BufferQueueReceiveIterator {
 
 impl Drop for BufferQueueReceiveIterator {
     fn drop(&mut self) {
-        while self.next().is_some() { }
+        while self.next().is_some() {}
     }
 }
-

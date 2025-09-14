@@ -15,7 +15,8 @@ pub struct FreeStack {
 impl FreeStack {
     pub fn new(capacity: usize) -> Self {
         Self {
-            slots: (0..capacity).map(|_| AtomicPtr::new(core::ptr::null_mut()))
+            slots: (0..capacity)
+                .map(|_| AtomicPtr::new(core::ptr::null_mut()))
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
             count: AtomicUsize::new(0),
@@ -38,7 +39,7 @@ impl FreeStack {
                     backoff.reset();
                     loop {
                         if let Some(taken) = BufferPtr::from_ptr(
-                            self.slots[count - 1].swap(core::ptr::null_mut(), Ordering::AcqRel)
+                            self.slots[count - 1].swap(core::ptr::null_mut(), Ordering::AcqRel),
                         ) {
                             return Some(taken);
                         }
@@ -80,7 +81,7 @@ impl FreeStack {
                             Ordering::Relaxed,
                         ) {
                             Ok(_) => break,
-                            Err(_) => { }
+                            Err(_) => {}
                         }
                         backoff.snooze();
                     }

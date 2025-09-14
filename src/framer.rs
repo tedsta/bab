@@ -1,9 +1,4 @@
-use crate::{
-    buffer::BufferPtr,
-    packet::Packet,
-    BufferWriter,
-    HeapBufferPool,
-};
+use crate::{BufferWriter, HeapBufferPool, buffer::BufferPtr, packet::Packet};
 
 pub struct Framer {
     buffer_writer: BufferWriter,
@@ -58,17 +53,26 @@ impl Framer {
         if written_len != self.frame_start {
             let packet_start = self.frame_start;
             self.frame_start = 0;
-            Some(Self::produce_packet(buffer, packet_start, written_len, true))
+            Some(Self::produce_packet(
+                buffer,
+                packet_start,
+                written_len,
+                true,
+            ))
         } else {
             // No new messages were written since the last call to `finish_frame` - decrement the
             // reference count on the current buffer.
             if self.frame_start == 0 {
                 // No messages were written on this buffer at all, so the reference count was never
                 // initialized.
-                unsafe { buffer.initialize_rc(1, 0, 0); }
+                unsafe {
+                    buffer.initialize_rc(1, 0, 0);
+                }
             }
 
-            unsafe { buffer.release_ref(1); }
+            unsafe {
+                buffer.release_ref(1);
+            }
 
             None
         }
@@ -94,25 +98,25 @@ impl Framer {
         if packet_start == 0 {
             if buffer_done {
                 // Scenario 1
-                unsafe { buffer.initialize_rc(1, 0, 0); }
+                unsafe {
+                    buffer.initialize_rc(1, 0, 0);
+                }
             } else {
                 // Scenario 2
-                unsafe { buffer.initialize_rc(2, 0, 0); }
+                unsafe {
+                    buffer.initialize_rc(2, 0, 0);
+                }
             }
         } else if !buffer_done {
             // Scenario 3
-            unsafe { buffer.take_ref(1); }
+            unsafe {
+                buffer.take_ref(1);
+            }
         } else {
             // Scenario 4 - do nothing
         }
 
-        unsafe {
-            Packet::new(
-                buffer,
-                packet_start,
-                packet_end - packet_start,
-            )
-        }
+        unsafe { Packet::new(buffer, packet_start, packet_end - packet_start) }
     }
 }
 

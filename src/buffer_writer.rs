@@ -1,7 +1,4 @@
-use crate::{
-    buffer::BufferPtr,
-    HeapBufferPool,
-};
+use crate::{HeapBufferPool, buffer::BufferPtr};
 
 pub struct BufferWriter {
     buffer_pool: HeapBufferPool,
@@ -28,44 +25,42 @@ impl BufferWriter {
     }
 
     pub async fn write(&mut self) -> &mut [u8] {
-        let write_cursor =
-            match &mut self.write_cursor {
-                Some(write_cursor) => write_cursor,
-                write_cursor @ None => {
-                    // Get next buffer
-                    let buffer = self.buffer_pool.acquire().await;
-                    *write_cursor = Some(BufferWriterCursor {
-                        buffer,
-                        end: 0,
-                    });
-                    write_cursor.as_ref().unwrap()
-                }
-            };
+        let write_cursor = match &mut self.write_cursor {
+            Some(write_cursor) => write_cursor,
+            write_cursor @ None => {
+                // Get next buffer
+                let buffer = self.buffer_pool.acquire().await;
+                *write_cursor = Some(BufferWriterCursor { buffer, end: 0 });
+                write_cursor.as_ref().unwrap()
+            }
+        };
 
         let offset = write_cursor.end;
 
-        unsafe { write_cursor.buffer.slice_mut(offset..self.buffer_pool.buffer_size()) }
+        unsafe {
+            write_cursor
+                .buffer
+                .slice_mut(offset..self.buffer_pool.buffer_size())
+        }
     }
 
     pub fn try_write(&mut self) -> Option<&mut [u8]> {
-        let write_cursor =
-            match &mut self.write_cursor {
-                Some(write_cursor) => write_cursor,
-                write_cursor @ None => {
-                    // Get next buffer
-                    let buffer = self.buffer_pool.try_acquire()?;
-                    *write_cursor = Some(BufferWriterCursor {
-                        buffer,
-                        end: 0,
-                    });
-                    write_cursor.as_ref().unwrap()
-                }
-            };
+        let write_cursor = match &mut self.write_cursor {
+            Some(write_cursor) => write_cursor,
+            write_cursor @ None => {
+                // Get next buffer
+                let buffer = self.buffer_pool.try_acquire()?;
+                *write_cursor = Some(BufferWriterCursor { buffer, end: 0 });
+                write_cursor.as_ref().unwrap()
+            }
+        };
 
         let offset = write_cursor.end;
 
         Some(unsafe {
-            write_cursor.buffer.slice_mut(offset..self.buffer_pool.buffer_size())
+            write_cursor
+                .buffer
+                .slice_mut(offset..self.buffer_pool.buffer_size())
         })
     }
 
@@ -129,7 +124,9 @@ mod test {
             let (buffer, len) = buffer_writer.next_buffer().unwrap();
             assert_eq!(unsafe { buffer.slice(0..len) }, b"helloworld");
 
-            unsafe { buffer_pool.release(buffer); }
+            unsafe {
+                buffer_pool.release(buffer);
+            }
         }
     }
 }

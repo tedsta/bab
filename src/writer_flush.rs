@@ -13,24 +13,20 @@ use core::{
     task::{Context, Poll, Waker},
 };
 
-#[cfg(feature = "std")]
-use std::sync::Arc;
 #[cfg(feature = "alloc")]
 use alloc::sync::Arc;
+#[cfg(feature = "std")]
+use std::sync::Arc;
 
 use crossbeam_utils::{Backoff, CachePadded};
 use spin::Mutex;
 use thid::ThreadLocal;
 
-use crate::{
-    buffer::BufferPtr,
-    BufferChain,
-    Packet,
-};
+use crate::{BufferChain, Packet, buffer::BufferPtr};
 
 pub const WRITE_CURSOR_FLUSHED_FLAG: u32 = 0x8000_0000;
-pub const WRITE_CURSOR_DONE:         u32 = 0x4000_0000;
-pub const WRITE_CURSOR_MASK:         u32 = 0x3FFF_FFFF;
+pub const WRITE_CURSOR_DONE: u32 = 0x4000_0000;
+pub const WRITE_CURSOR_MASK: u32 = 0x3FFF_FFFF;
 
 pub fn new_writer_flusher() -> (WriterFlushSender, WriterFlushReceiver) {
     let shared = Arc::new(Mutex::new(WriterFlushShared {
@@ -103,7 +99,9 @@ impl WriterFlushSender {
 
         let mut shared = self.shared.lock();
         if let Some((_, prev_shared_tail)) = &mut shared.head_tail {
-            unsafe { prev_shared_tail.set_next(Some(head)); }
+            unsafe {
+                prev_shared_tail.set_next(Some(head));
+            }
             *prev_shared_tail = tail;
         } else {
             shared.head_tail = Some((head, tail));
@@ -145,7 +143,8 @@ impl WriterFlushSender {
 
         let local = self.local.get_or_default();
         local.unflushed_bytes.set(
-            local.unflushed_bytes.get() + ((new_write_cursor & WRITE_CURSOR_MASK) - write_start) as usize
+            local.unflushed_bytes.get()
+                + ((new_write_cursor & WRITE_CURSOR_MASK) - write_start) as usize,
         );
 
         if write_start == 0 || write_cursor & WRITE_CURSOR_FLUSHED_FLAG != 0 {
@@ -163,7 +162,9 @@ impl WriterFlushSender {
         let flush_cursor = unsafe { buffer.flush_cursor_mut() };
         let len = core::mem::replace(flush_cursor, 0);
 
-        buffer.write_cursor().store(len | WRITE_CURSOR_DONE, Ordering::Release);
+        buffer
+            .write_cursor()
+            .store(len | WRITE_CURSOR_DONE, Ordering::Release);
 
         let local = self.local.get_or_default();
         local.chain.push(buffer);
@@ -245,17 +246,18 @@ pub struct Flush {
 }
 
 impl WriterFlushReceiver {
-    fn new(
-        shared: Arc<Mutex<WriterFlushShared>>,
-    ) -> Self {
-        Self {
-            shared,
-        }
+    fn new(shared: Arc<Mutex<WriterFlushShared>>) -> Self {
+        Self { shared }
     }
 
     pub async fn flush(&mut self) -> FlushIterator {
-        let recv_head = WriterFlushQueueReceive { shared: &self.shared }.await;
-        FlushIterator { head: Some(recv_head) }
+        let recv_head = WriterFlushQueueReceive {
+            shared: &self.shared,
+        }
+        .await;
+        FlushIterator {
+            head: Some(recv_head),
+        }
     }
 }
 
@@ -272,7 +274,8 @@ impl core::iter::Iterator for FlushIterator {
             // we still have exclusive access.
             self.head = unsafe { buffer.swap_next(None) };
 
-            let write_cursor = buffer.write_cursor()
+            let write_cursor = buffer
+                .write_cursor()
                 .fetch_or(WRITE_CURSOR_FLUSHED_FLAG, Ordering::AcqRel);
             let writer_id = unsafe { buffer.writer_id() };
 
@@ -298,8 +301,12 @@ impl core::iter::Iterator for FlushIterator {
             } else if buffer_is_done {
                 debug_assert_eq!(*flush_cursor, write_cursor);
                 *flush_cursor = 0;
-                unsafe { buffer.receive(1); }
-                unsafe { buffer.release_ref(1); }
+                unsafe {
+                    buffer.receive(1);
+                }
+                unsafe {
+                    buffer.release_ref(1);
+                }
             }
         }
 
@@ -309,26 +316,25 @@ impl core::iter::Iterator for FlushIterator {
 
 impl Drop for FlushIterator {
     fn drop(&mut self) {
-        while self.next().is_some() { }
+        while self.next().is_some() {}
     }
 }
 
 impl Flush {
-    pub fn len(&self) -> usize { self.len }
+    pub fn len(&self) -> usize {
+        self.len
+    }
 
-    pub fn writer_id(&self) -> usize { self.writer_id }
+    pub fn writer_id(&self) -> usize {
+        self.writer_id
+    }
 }
 
 impl core::ops::Deref for Flush {
     type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            core::slice::from_raw_parts(
-                self.buffer.data().add(self.offset),
-                self.len,
-            )
-        }
+        unsafe { core::slice::from_raw_parts(self.buffer.data().add(self.offset), self.len) }
     }
 }
 
@@ -357,16 +363,12 @@ impl From<Flush> for Packet {
             // releasing its buffer reference. But doing that greatly complicates the shutdown
             // logic, (mainly releasing unflushed buffers at the senders) and I haven't been able to
             // find a reasonable solution yet.
-            unsafe { flush.buffer.take_shared_ref(1); }
+            unsafe {
+                flush.buffer.take_shared_ref(1);
+            }
         }
 
-        let packet = unsafe {
-            Self::new(
-                flush.buffer,
-                flush.offset as usize,
-                flush.len as usize,
-            )
-        };
+        let packet = unsafe { Self::new(flush.buffer, flush.offset as usize, flush.len as usize) };
 
         core::mem::forget(flush);
 

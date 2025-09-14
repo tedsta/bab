@@ -1,7 +1,7 @@
-#[cfg(feature = "std")]
-use std::sync::{Arc, Weak};
 #[cfg(feature = "alloc")]
 use alloc::sync::{Arc, Weak};
+#[cfg(feature = "std")]
+use std::sync::{Arc, Weak};
 
 use core::{
     cell::UnsafeCell,
@@ -90,7 +90,9 @@ impl SignalTreeNode {
         let previous_sibling = parent.previous_sibling.upgrade();
         if let Some(previous_sibling) = &previous_sibling {
             // SAFETY: we currently have `parent_node.children_head_tail.lock()`.
-            unsafe { *previous_sibling.next_sibling.get() = next_sibling.clone(); }
+            unsafe {
+                *previous_sibling.next_sibling.get() = next_sibling.clone();
+            }
         }
 
         // If this node is the head or tail sibling, update the parent's head/tail children
@@ -146,7 +148,7 @@ impl SignalTree {
             Ordering::Relaxed,
             Ordering::Relaxed,
         ) {
-            Ok(_) => { }
+            Ok(_) => {}
             Err(_) => {
                 // Already notified - immediately notify the new child and return early.
                 child.notify();

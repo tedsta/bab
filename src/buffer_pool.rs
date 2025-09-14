@@ -8,13 +8,17 @@ use core::{
 };
 
 #[cfg(feature = "alloc")]
-use alloc::{alloc::{alloc, dealloc}, boxed::Box, vec::Vec};
+use alloc::{
+    alloc::{alloc, dealloc},
+    boxed::Box,
+    vec::Vec,
+};
 #[cfg(feature = "std")]
 use std::alloc::{alloc, dealloc};
 
 use crossbeam_utils::CachePadded;
 use thid::ThreadLocal;
-use waitq::{IFulfillment, Fulfillment, Waiter, WaiterQueue};
+use waitq::{Fulfillment, IFulfillment, Waiter, WaiterQueue};
 
 use crate::{
     buffer::{Buffer, BufferPtr},
@@ -29,20 +33,19 @@ pub(crate) struct Local {
     local_buffer_state: *const [LocalBufferState],
 }
 
-unsafe impl Send for Local { }
+unsafe impl Send for Local {}
 
 impl Local {
     #[cfg(any(feature = "std", feature = "alloc"))]
     fn new_heap(total_buffer_count: usize) -> Self {
         let local_buffer_state = Box::into_raw(
-            (0..total_buffer_count).map(|_| {
-                LocalBufferState {
+            (0..total_buffer_count)
+                .map(|_| LocalBufferState {
                     ref_count: Cell::new(0),
                     shared_rc_contribution: Cell::new(0),
-                }
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice()
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         );
 
         Self {
@@ -62,7 +65,9 @@ impl Local {
             debug_assert!(self.count.get() > 0);
             self.count.set(self.count.get() - 1);
             self.head.set(unsafe { head_ptr.get_next() });
-            unsafe { head_ptr.set_next(None); }
+            unsafe {
+                head_ptr.set_next(None);
+            }
 
             head_ptr
         })
@@ -70,9 +75,7 @@ impl Local {
 
     #[inline]
     pub(crate) fn local_buffer_state(&self, buffer_id: usize) -> &LocalBufferState {
-        unsafe {
-            &*core::ptr::addr_of!((*self.local_buffer_state)[buffer_id])
-        }
+        unsafe { &*core::ptr::addr_of!((*self.local_buffer_state)[buffer_id]) }
     }
 }
 
@@ -111,12 +114,13 @@ pub struct BufferPoolThreadGuard<'a> {
 
 impl Drop for BufferPoolThreadGuard<'_> {
     fn drop(&mut self) {
-        self.buffer_pool.decrement_local_buffers_in_use(self.buffer_pool.local());
+        self.buffer_pool
+            .decrement_local_buffers_in_use(self.buffer_pool.local());
     }
 }
 
-unsafe impl Send for BufferPool { }
-unsafe impl Sync for BufferPool { }
+unsafe impl Send for BufferPool {}
+unsafe impl Sync for BufferPool {}
 
 impl BufferPool {
     /// Get the total number of buffers from this pool that are in circulation.
@@ -131,9 +135,7 @@ impl BufferPool {
 
     #[inline]
     pub fn buffer_by_id(&self, id: u32) -> BufferPtr {
-        let buffer_raw = unsafe {
-            self.alloc.byte_add(id as usize * self.buffer_padded_size)
-        };
+        let buffer_raw = unsafe { self.alloc.byte_add(id as usize * self.buffer_padded_size) };
         BufferPtr::from_ptr(buffer_raw).unwrap()
     }
 
@@ -143,14 +145,13 @@ impl BufferPool {
     /// received and released by this thread.
     pub fn register_thread(&self) -> BufferPoolThreadGuard<'_> {
         self.increment_local_buffers_in_use(self.local());
-        BufferPoolThreadGuard {
-            buffer_pool: self,
-        }
+        BufferPoolThreadGuard { buffer_pool: self }
     }
 
     #[inline]
     pub(crate) fn local(&self) -> &Local {
-        self.local.get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
+        self.local
+            .get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
     }
 
     pub(crate) fn increment_local_buffers_in_use(&self, local: &Local) {
@@ -183,7 +184,8 @@ impl BufferPool {
                     BufferPoolShutdownStatus::NotShutdown
                 }
             } else {
-                self.shutdown_released_buffers.fetch_add(1, Ordering::Relaxed);
+                self.shutdown_released_buffers
+                    .fetch_add(1, Ordering::Relaxed);
                 BufferPoolShutdownStatus::AlreadyShutdown
             }
         } else {
@@ -192,7 +194,10 @@ impl BufferPool {
     }
 
     pub(crate) fn is_shutting_down(&self) -> bool {
-        match self.ref_count.compare_exchange(0, 0, Ordering::Acquire, Ordering::Relaxed) {
+        match self
+            .ref_count
+            .compare_exchange(0, 0, Ordering::Acquire, Ordering::Relaxed)
+        {
             Ok(_) => true,
             Err(_) => false,
         }
@@ -284,7 +289,8 @@ impl BufferPool {
                     let guard = waiter_queue_guard.get_or_insert_with(|| self.waiter_queue.lock());
 
                     if guard.waiter_count() > 0 {
-                        waiter_queue_guard.take()
+                        waiter_queue_guard
+                            .take()
                             .expect("bug: missing lock guard")
                             .notify(release_head, release_count as usize);
                         // Don't push onto free stack since we've used the released buffers to
@@ -316,7 +322,9 @@ impl BufferPool {
 
         if let Some(tail) = tail {
             // Append newly released buffers to end of local stockpile.
-            unsafe { tail.set_next(Some(release_head)); }
+            unsafe {
+                tail.set_next(Some(release_head));
+            }
             local.count.set(local.count.get() + release_count as u32);
         } else {
             // Local stockpile is empty.
@@ -353,8 +361,9 @@ impl BufferPool {
         while let Some(_) = this.free_stack.pop() {
             released_buffers += this.batch_size;
         }
-        let prev_released_buffers =
-            this.shutdown_released_buffers.fetch_add(released_buffers, Ordering::Relaxed);
+        let prev_released_buffers = this
+            .shutdown_released_buffers
+            .fetch_add(released_buffers, Ordering::Relaxed);
 
         if prev_released_buffers + released_buffers == this.total_buffer_count as u32 {
             // All buffers have been released - time to drop
@@ -365,12 +374,16 @@ impl BufferPool {
 
     pub(crate) fn already_shutdown_try_drop(buffer_pool: *mut BufferPool) {
         let this = unsafe { &*buffer_pool };
-        if this.shutdown_released_buffers.compare_exchange(
-            this.total_buffer_count as u32,
-            this.total_buffer_count as u32,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if this
+            .shutdown_released_buffers
+            .compare_exchange(
+                this.total_buffer_count as u32,
+                this.total_buffer_count as u32,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
@@ -394,18 +407,13 @@ pub struct HeapBufferPool {
 }
 
 impl HeapBufferPool {
-    pub fn new(
-        buffer_size: usize,
-        batch_count: usize,
-        batch_size: usize,
-    ) -> Self {
+    pub fn new(buffer_size: usize, batch_count: usize, batch_size: usize) -> Self {
         // Helpers adapted from core::alloc::Layout till they're stable.
         fn padding_needed_for_layout(layout: Layout) -> usize {
             let len = layout.size();
             let align = layout.align();
 
-            (len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1))
-                .wrapping_sub(len)
+            (len.wrapping_add(align).wrapping_sub(1) & !align.wrapping_sub(1)).wrapping_sub(len)
         }
         fn repeat_layout(layout: Layout, n: usize) -> (Layout, usize) {
             let padded_size = layout.size() + padding_needed_for_layout(layout);
@@ -443,7 +451,12 @@ impl HeapBufferPool {
         for id in 0..total_buffer_count {
             let buffer = buffer_pool.buffer_by_id(id as u32);
             unsafe {
-                Buffer::initialize(buffer.as_ptr_mut(), buffer_pool_ptr, id as usize, buffer_size);
+                Buffer::initialize(
+                    buffer.as_ptr_mut(),
+                    buffer_pool_ptr,
+                    id as usize,
+                    buffer_size,
+                );
             }
         }
 
@@ -458,19 +471,25 @@ impl HeapBufferPool {
                 let new_head = buffer_pool.buffer_by_id(next_buffer_id);
                 head = Some(new_head);
                 next_buffer_id += 1;
-                unsafe { new_head.set_next(next); }
+                unsafe {
+                    new_head.set_next(next);
+                }
             }
-            unsafe { new_batch_head.set_next(head); }
+            unsafe {
+                new_batch_head.set_next(head);
+            }
 
-            buffer_pool.free_stack.push_if(new_batch_head, |_|  true);
+            buffer_pool.free_stack.push_if(new_batch_head, |_| true);
         }
 
-        Self { ptr: buffer_pool_ptr }
+        Self {
+            ptr: buffer_pool_ptr,
+        }
     }
 }
 
-unsafe impl Send for HeapBufferPool { }
-unsafe impl Sync for HeapBufferPool { }
+unsafe impl Send for HeapBufferPool {}
+unsafe impl Sync for HeapBufferPool {}
 
 impl core::ops::Deref for HeapBufferPool {
     type Target = BufferPool;
@@ -511,7 +530,9 @@ impl IFulfillment for BufferPtr {
             tail = next;
         }
 
-        unsafe { tail.set_next(Some(other)); }
+        unsafe {
+            tail.set_next(Some(other));
+        }
     }
 }
 
@@ -533,26 +554,21 @@ impl Future for Acquire<'_> {
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let buffer_pool = self.buffer_pool;
         let local = self.buffer_pool.local();
-        let Poll::Ready(fulfillment) =
-            self.as_ref().waiter().poll_fulfillment(
-                context,
-                || {
-                    if let Some(local_head) = local.head.replace(None) {
-                        // This case can happen if waitq notify_one_local fails to notify the local
-                        // head.
-                        Some(Fulfillment {
-                            inner: local_head,
-                            count: local.count.replace(0) as usize,
-                        })
-                    } else {
-                        buffer_pool.try_take_batch(local)
-                            .map(|ptr| {
-                                Fulfillment { inner: ptr, count: buffer_pool.batch_size as usize }
-                            })
-                    }
-                }
-            )
-        else {
+        let Poll::Ready(fulfillment) = self.as_ref().waiter().poll_fulfillment(context, || {
+            if let Some(local_head) = local.head.replace(None) {
+                // This case can happen if waitq notify_one_local fails to notify the local
+                // head.
+                Some(Fulfillment {
+                    inner: local_head,
+                    count: local.count.replace(0) as usize,
+                })
+            } else {
+                buffer_pool.try_take_batch(local).map(|ptr| Fulfillment {
+                    inner: ptr,
+                    count: buffer_pool.batch_size as usize,
+                })
+            }
+        }) else {
             return Poll::Pending;
         };
 
@@ -571,7 +587,8 @@ impl Future for Acquire<'_> {
 impl Drop for Acquire<'_> {
     fn drop(&mut self) {
         if let Some(fulfillment) = self.waiter.cancel() {
-            self.buffer_pool.release_many(fulfillment.inner, fulfillment.count as usize);
+            self.buffer_pool
+                .release_many(fulfillment.inner, fulfillment.count as usize);
         }
     }
 }
@@ -590,7 +607,9 @@ mod test {
         let b = buffer_pool.try_acquire().unwrap();
         let c = buffer_pool.try_acquire().unwrap();
         for buffer in [a, b, c] {
-            unsafe { buffer.initialize_rc(1, 0, 0); }
+            unsafe {
+                buffer.initialize_rc(1, 0, 0);
+            }
         }
 
         assert_eq!(a.count(), 1);
@@ -599,12 +618,12 @@ mod test {
 
         let mut f = Fulfillment { inner: a, count: 1 };
 
-        f.append(Fulfillment { inner: b, count: 1});
+        f.append(Fulfillment { inner: b, count: 1 });
         assert_eq!((f.inner, f.count), (a, 2));
         assert_eq!(a.count(), 2);
         assert_eq!(b.count(), 1);
         assert_eq!(c.count(), 1);
-        f.append(Fulfillment { inner: c, count: 1});
+        f.append(Fulfillment { inner: c, count: 1 });
         assert_eq!((f.inner, f.count), (a, 3));
         assert_eq!(a.count(), 3);
         assert_eq!(b.count(), 2);
@@ -625,7 +644,9 @@ mod test {
         assert_eq!(c.count(), 1);
 
         for buffer in [a, b, c] {
-            unsafe { buffer.release_ref(1); }
+            unsafe {
+                buffer.release_ref(1);
+            }
         }
     }
 
@@ -675,7 +696,9 @@ mod test {
                 let data = unsafe {
                     core::slice::from_raw_parts_mut(buf.data(), buffer_pool.buffer_size())
                 };
-                unsafe { buf.initialize_rc(1, 0, 0); }
+                unsafe {
+                    buf.initialize_rc(1, 0, 0);
+                }
                 data[..4].copy_from_slice(&[1, 2, 3, 4]);
                 channel.send(buf).unwrap();
             }
@@ -691,7 +714,9 @@ mod test {
                     let data = unsafe {
                         core::slice::from_raw_parts_mut(buf.data(), buffer_pool.buffer_size())
                     };
-                    unsafe { buf.initialize_rc(1, 0, 0); }
+                    unsafe {
+                        buf.initialize_rc(1, 0, 0);
+                    }
                     data[..4].copy_from_slice(&[1, 2, 3, 4]);
                     channel.send(buf).unwrap();
                 })
@@ -709,7 +734,9 @@ mod test {
                     core::slice::from_raw_parts_mut(buf.data(), buffer_pool.buffer_size())
                 };
                 assert_eq!(&data[..4], &[1, 2, 3, 4]);
-                unsafe { buf.release_ref(1); }
+                unsafe {
+                    buf.release_ref(1);
+                }
             }
 
             assert!(channel.try_recv().is_err());

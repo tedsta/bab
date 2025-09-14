@@ -1,7 +1,4 @@
-use core::{
-    cell::Cell,
-    mem::MaybeUninit,
-};
+use core::{cell::Cell, mem::MaybeUninit};
 
 use crate::buffer::BufferPtr;
 
@@ -35,7 +32,9 @@ impl Packet {
         packet
     }
 
-    pub fn len(&self) -> usize { self.len.get() as usize }
+    pub fn len(&self) -> usize {
+        self.len.get() as usize
+    }
 
     pub fn set_len(&self, new_len: usize) {
         self.len.set(new_len as u32);
@@ -52,11 +51,13 @@ impl Packet {
         assert!(out.len() >= sorted_offsets.len());
 
         if sorted_offsets.len() > 1 {
-            unsafe { self.buffer.take_ref(sorted_offsets.len() as u32 - 1); }
+            unsafe {
+                self.buffer.take_ref(sorted_offsets.len() as u32 - 1);
+            }
         }
 
-        let regions = (0..sorted_offsets.len() - 1)
-            .map(|i| [sorted_offsets[i], sorted_offsets[i + 1]]);
+        let regions =
+            (0..sorted_offsets.len() - 1).map(|i| [sorted_offsets[i], sorted_offsets[i + 1]]);
         for ([offset, end], out) in regions.zip(out.iter_mut()) {
             let offset = offset as u32;
             let end = end as u32;
@@ -78,7 +79,7 @@ impl Packet {
     }
 }
 
-impl core::marker::Unpin for Packet { }
+impl core::marker::Unpin for Packet {}
 
 impl core::ops::Deref for Packet {
     type Target = [u8];
@@ -94,12 +95,16 @@ impl core::ops::Deref for Packet {
 }
 
 impl AsRef<[u8]> for Packet {
-    fn as_ref(&self) -> &[u8] { core::ops::Deref::deref(self) }
+    fn as_ref(&self) -> &[u8] {
+        core::ops::Deref::deref(self)
+    }
 }
 
 impl Clone for Packet {
     fn clone(&self) -> Self {
-        unsafe { self.buffer.take_ref(1); }
+        unsafe {
+            self.buffer.take_ref(1);
+        }
 
         Self {
             buffer: self.buffer,
@@ -111,17 +116,19 @@ impl Clone for Packet {
 
 impl Drop for Packet {
     fn drop(&mut self) {
-        unsafe { self.buffer.release_ref(1); }
+        unsafe {
+            self.buffer.release_ref(1);
+        }
     }
 }
 
 impl core::fmt::Debug for Packet {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Packet")
-         .field("buffer", &unsafe { self.buffer.id() })
-         .field("offset", &self.offset.get())
-         .field("len", &self.len.get())
-         .finish()
+            .field("buffer", &unsafe { self.buffer.id() })
+            .field("offset", &self.offset.get())
+            .field("len", &self.len.get())
+            .finish()
     }
 }
 
@@ -132,7 +139,7 @@ pub struct SendPacket {
     shared_rc_contribution: u32,
 }
 
-unsafe impl Send for SendPacket { }
+unsafe impl Send for SendPacket {}
 
 impl SendPacket {
     #[inline]
@@ -149,7 +156,9 @@ impl SendPacket {
         packet
     }
 
-    pub fn len(&self) -> usize { self.len.get() as usize }
+    pub fn len(&self) -> usize {
+        self.len.get() as usize
+    }
 
     pub fn advance(&self, n: usize) {
         let n = n as u32;
@@ -173,7 +182,9 @@ impl core::ops::Deref for SendPacket {
 }
 
 impl AsRef<[u8]> for SendPacket {
-    fn as_ref(&self) -> &[u8] { core::ops::Deref::deref(self) }
+    fn as_ref(&self) -> &[u8] {
+        core::ops::Deref::deref(self)
+    }
 }
 
 impl Drop for SendPacket {
@@ -188,9 +199,9 @@ impl Drop for SendPacket {
 impl core::fmt::Debug for SendPacket {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SendPacket")
-         .field("buffer", &unsafe { self.buffer.id() })
-         .field("offset", &self.offset.get())
-         .field("len", &self.len.get())
-         .finish()
+            .field("buffer", &unsafe { self.buffer.id() })
+            .field("offset", &self.offset.get())
+            .field("len", &self.len.get())
+            .finish()
     }
 }

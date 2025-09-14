@@ -7,18 +7,15 @@ use core::{
 
 use crossbeam_utils::CachePadded;
 
-use crate::{
-    buffer_pool::BufferPoolShutdownStatus,
-    BufferPool,
-};
+use crate::{BufferPool, buffer_pool::BufferPoolShutdownStatus};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferPtr {
     ptr: NonNull<Buffer>,
 }
 
-unsafe impl Send for BufferPtr { }
-unsafe impl Sync for BufferPtr { }
+unsafe impl Send for BufferPtr {}
+unsafe impl Sync for BufferPtr {}
 
 impl BufferPtr {
     pub unsafe fn id(&self) -> u32 {
@@ -31,20 +28,18 @@ impl BufferPtr {
     }
 
     #[inline]
-    pub unsafe fn slice(&self, range: core::ops::Range<usize>) -> &[u8] { unsafe {
-        core::slice::from_raw_parts(
-            self.data().add(range.start),
-            range.end - range.start,
-        )
-    }}
+    pub unsafe fn slice(&self, range: core::ops::Range<usize>) -> &[u8] {
+        unsafe {
+            core::slice::from_raw_parts(self.data().add(range.start), range.end - range.start)
+        }
+    }
 
     #[inline]
-    pub unsafe fn slice_mut(&self, range: core::ops::Range<usize>) -> &mut [u8] { unsafe {
-        core::slice::from_raw_parts_mut(
-            self.data().add(range.start),
-            range.end - range.start,
-        )
-    }}
+    pub unsafe fn slice_mut(&self, range: core::ops::Range<usize>) -> &mut [u8] {
+        unsafe {
+            core::slice::from_raw_parts_mut(self.data().add(range.start), range.end - range.start)
+        }
+    }
 
     /// SAFETY: this method must not be called concurrently from multiple threads.
     pub unsafe fn set_next(&self, next: Option<Self>) {
@@ -62,9 +57,7 @@ impl BufferPtr {
     /// SAFETY: this method must not be called concurrently with set_next or swap_next from
     /// multiple threads.
     pub unsafe fn get_next(&self) -> Option<Self> {
-        unsafe {
-            *self.as_ref().next.get()
-        }
+        unsafe { *self.as_ref().next.get() }
     }
 
     /// SAFETY: you must have exclusive access to this buffer.
@@ -84,7 +77,9 @@ impl BufferPtr {
         let buffer = self.as_ref();
         let buffer_pool_ptr = buffer.buffer_pool;
         let buffer_pool = unsafe { &*buffer_pool_ptr };
-        unsafe { buffer_pool.release(self); }
+        unsafe {
+            buffer_pool.release(self);
+        }
     }
 
     /// You must ensure that you have exclusive access to the reference count of the buffer - that
@@ -114,9 +109,9 @@ impl BufferPtr {
     /// count and decrements the thread-local reference count.
     ///
     /// Returns the `shared_rc_contribution` value that the receiving thread should add to its own.
-    pub unsafe fn send(&self) -> u32 { unsafe {
-        self.send_bulk(1)
-    }}
+    pub unsafe fn send(&self) -> u32 {
+        unsafe { self.send_bulk(1) }
+    }
 
     /// Used when converting a LocalPacket into a sendable Packet. Increments the shared reference
     /// count and decrements the thread-local reference count.
@@ -130,7 +125,9 @@ impl BufferPtr {
 
         debug_assert!(buffer_local.ref_count.get() > 0);
 
-        buffer_local.ref_count.set(buffer_local.ref_count.get() - count);
+        buffer_local
+            .ref_count
+            .set(buffer_local.ref_count.get() - count);
 
         if buffer_local.ref_count.get() == 0 {
             // There are no remaining references on the current thread, so the shared reference
@@ -173,10 +170,12 @@ impl BufferPtr {
         let local = unsafe { &*buffer.buffer_pool }.local();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
-        let prev_local_rc = buffer_local.ref_count.replace(buffer_local.ref_count.get() + 1);
-        buffer_local.shared_rc_contribution.set(
-            buffer_local.shared_rc_contribution.get() + shared_rc_contribution
-        );
+        let prev_local_rc = buffer_local
+            .ref_count
+            .replace(buffer_local.ref_count.get() + 1);
+        buffer_local
+            .shared_rc_contribution
+            .set(buffer_local.shared_rc_contribution.get() + shared_rc_contribution);
 
         if prev_local_rc == 0 {
             unsafe { &*buffer.buffer_pool }.increment_local_buffers_in_use(local);
@@ -205,7 +204,9 @@ impl BufferPtr {
 
         let prev_rc = buffer_local.ref_count.get();
         buffer_local.ref_count.set(prev_rc + count);
-        buffer_local.shared_rc_contribution.set(buffer_local.shared_rc_contribution.get() + count);
+        buffer_local
+            .shared_rc_contribution
+            .set(buffer_local.shared_rc_contribution.get() + count);
         buffer.ref_count.fetch_add(count, Ordering::Relaxed);
 
         if prev_rc == 0 {
@@ -221,7 +222,9 @@ impl BufferPtr {
 
         debug_assert!(buffer_local.ref_count.get() >= count);
 
-        buffer_local.ref_count.set(buffer_local.ref_count.get() - count);
+        buffer_local
+            .ref_count
+            .set(buffer_local.ref_count.get() - count);
         if buffer_local.ref_count.get() > 0 {
             return;
         }
@@ -236,7 +239,9 @@ impl BufferPtr {
         let shared_rc_contribution = buffer_local.shared_rc_contribution.replace(0);
         if shared_rc_contribution > 0 {
             // time to release the buffer
-            let prev_rc = buffer.ref_count.fetch_sub(shared_rc_contribution, Ordering::Relaxed);
+            let prev_rc = buffer
+                .ref_count
+                .fetch_sub(shared_rc_contribution, Ordering::Relaxed);
             if prev_rc > shared_rc_contribution {
                 // There are still active references, don't release the buffer.
                 return;
@@ -249,7 +254,9 @@ impl BufferPtr {
         // We don't release the buffer if the pool is already shutting down. We do this so that
         // BufferPool::shutdown_now_try_drop has unique access to all threads' local buffers cache.
         if shutdown_status != BufferPoolShutdownStatus::AlreadyShutdown {
-            unsafe { buffer_pool.release(*self); }
+            unsafe {
+                buffer_pool.release(*self);
+            }
         }
 
         match shutdown_status {
@@ -259,7 +266,7 @@ impl BufferPtr {
             BufferPoolShutdownStatus::AlreadyShutdown => {
                 BufferPool::already_shutdown_try_drop(buffer_pool_ptr as *mut _);
             }
-            BufferPoolShutdownStatus::NotShutdown => { }
+            BufferPoolShutdownStatus::NotShutdown => {}
         }
     }
 
@@ -291,9 +298,9 @@ impl BufferPtr {
         &self.as_ref().write_cursor
     }
 
-    pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 { unsafe {
-        &mut *self.as_ref().flush_cursor.get()
-    }}
+    pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 {
+        unsafe { &mut *self.as_ref().flush_cursor.get() }
+    }
 
     #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
@@ -321,7 +328,9 @@ impl Buffer {
     pub(crate) fn layout_with_data(capacity: usize) -> Layout {
         let layout = Layout::new::<CachePadded<Buffer>>();
         // Note that Buffer's data comes after the `Buffer` alignment padding.
-        let (layout, _) = layout.extend(Layout::array::<u8>(capacity).unwrap()).unwrap();
+        let (layout, _) = layout
+            .extend(Layout::array::<u8>(capacity).unwrap())
+            .unwrap();
         layout
     }
 
@@ -335,16 +344,18 @@ impl Buffer {
         buffer_pool: *const BufferPool,
         buffer_id: usize,
         capacity: usize,
-    ) { unsafe {
-        use core::ptr::addr_of_mut;
+    ) {
+        unsafe {
+            use core::ptr::addr_of_mut;
 
-        addr_of_mut!((*buffer).buffer_pool).write(buffer_pool);
-        addr_of_mut!((*buffer).buffer_id).write(buffer_id);
-        addr_of_mut!((*buffer).next).write(UnsafeCell::new(None));
-        addr_of_mut!((*buffer).writer_id).write(AtomicUsize::new(usize::MAX));
-        addr_of_mut!((*buffer).write_cursor).write(AtomicU32::new(0));
-        addr_of_mut!((*buffer).flush_cursor).write(UnsafeCell::new(0));
-        addr_of_mut!((*buffer).ref_count).write(AtomicU32::new(0));
-        Self::data(buffer).write_bytes(0, capacity);
-    }}
+            addr_of_mut!((*buffer).buffer_pool).write(buffer_pool);
+            addr_of_mut!((*buffer).buffer_id).write(buffer_id);
+            addr_of_mut!((*buffer).next).write(UnsafeCell::new(None));
+            addr_of_mut!((*buffer).writer_id).write(AtomicUsize::new(usize::MAX));
+            addr_of_mut!((*buffer).write_cursor).write(AtomicU32::new(0));
+            addr_of_mut!((*buffer).flush_cursor).write(UnsafeCell::new(0));
+            addr_of_mut!((*buffer).ref_count).write(AtomicU32::new(0));
+            Self::data(buffer).write_bytes(0, capacity);
+        }
+    }
 }
