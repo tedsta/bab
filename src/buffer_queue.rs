@@ -10,11 +10,11 @@ use alloc::sync::Arc;
 
 use crossbeam_utils::CachePadded;
 use spin::Mutex;
+use thid::ThreadLocal;
 
 use crate::{
     buffer::BufferPtr,
     buffer_chain::BufferChain,
-    thread_local::ThreadLocal,
 };
 
 pub fn buffer_queue() -> (BufferQueueSender, BufferQueueReceiver) {

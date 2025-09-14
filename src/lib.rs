@@ -20,8 +20,6 @@ pub use framer::Framer;
 pub use signal::Signal;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use signal::SignalTree;
-pub use thread_id::ThreadId;
-pub use thread_local::ThreadLocal;
 pub use writer::{
     DynWriter, LocalWriter, LocalWriterNoFlush, SharedWriter,
     Write, Writer,
@@ -38,7 +36,4 @@ mod packet;
 mod writer_flush;
 mod framer;
 mod signal;
-pub mod thread_id;
-mod thread_local;
 mod writer;
-mod waiter_queue;

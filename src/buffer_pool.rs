@@ -13,12 +13,12 @@ use alloc::{alloc::{alloc, dealloc}, boxed::Box, vec::Vec};
 use std::alloc::{alloc, dealloc};
 
 use crossbeam_utils::CachePadded;
+use thid::ThreadLocal;
+use waitq::{IFulfillment, Fulfillment, Waiter, WaiterQueue};
 
 use crate::{
     buffer::{Buffer, BufferPtr},
     free_stack::FreeStack,
-    thread_local::ThreadLocal,
-    waiter_queue::{IFulfillment, Fulfillment, Waiter, WaiterQueue},
 };
 
 pub(crate) struct Local {
@@ -272,78 +272,40 @@ impl BufferPool {
 
         // Release batch
 
-        let Some(watermark) = local.watermark.take() else {
-            unreachable!();
-        };
+        while let Some(watermark) = local.watermark.take() {
+            let release_head = unsafe { watermark.swap_next(None) }.unwrap();
+            let release_count = self.batch_size;
+            local.count.set(local.count.get() - self.batch_size as u32);
 
-        let release_head = unsafe { watermark.swap_next(None) }.unwrap();
-        let release_count = self.batch_size;
-        local.count.set(local.count.get() - self.batch_size as u32);
+            let mut waiter_queue_guard = None;
+            self.free_stack.push_if(release_head, |free_count| {
+                if free_count == 0 {
+                    // Only need to try to notify a waiter if the stock was empty.
+                    let guard = waiter_queue_guard.get_or_insert_with(|| self.waiter_queue.lock());
 
-        debug_assert!(local.count.get() < (self.batch_size as u32 * 3) / 2);
-        debug_assert_eq!(release_count, self.batch_size);
-
-        let mut waiter_queue_guard = None;
-        self.free_stack.push_if(release_head, |free_count| {
-            if free_count == 0 {
-                // Only need to try to notify a waiter if the stock was empty.
-                let guard = waiter_queue_guard.get_or_insert_with(|| self.waiter_queue.lock());
-
-                let waiter_count = guard.waiter_count();
-                if waiter_count > 0 {
-                    Self::notify_waiters(
-                        release_head, release_count as usize, waiter_count,
-                        |fulfillment| {
-                            guard.notify(fulfillment.inner, fulfillment.count);
-                        },
-                    );
-                    // Don't push onto free stack since we've used the released buffers to
-                    // fulfill waiters.
-                    return false;
+                    if guard.waiter_count() > 0 {
+                        waiter_queue_guard.take()
+                            .expect("bug: missing lock guard")
+                            .notify(release_head, release_count as usize);
+                        // Don't push onto free stack since we've used the released buffers to
+                        // fulfill waiters.
+                        return false;
+                    }
                 }
-            }
 
-            true
-        });
-    }
-
-    fn notify_waiters(
-        release_head: BufferPtr,
-        release_count: usize,
-        waiter_count: usize,
-        mut notify_fn: impl FnMut(Fulfillment<BufferPtr>),
-    ) {
-        let mut fulfillment = Fulfillment {
-            inner: release_head,
-            count: release_count,
-        };
-
-        let buffers_per_waiter: u32;
-        let remainder: u32;
-        if release_count >= waiter_count {
-            buffers_per_waiter = (release_count / waiter_count) as u32;
-            remainder = (release_count % waiter_count) as u32;
-        } else {
-            buffers_per_waiter = 1;
-            remainder = 0;
+                true
+            });
+            // TODO there's a more efficient way to do this than re-chasing all the pointers every
+            // time around.
+            self.find_watermark(local);
         }
-
-        let next_fulfillment = fulfillment.take(buffers_per_waiter + remainder);
-        notify_fn(next_fulfillment);
-
-        for _ in 1..core::cmp::min(waiter_count, release_count) {
-            let next_fulfillment = fulfillment.take(buffers_per_waiter);
-            notify_fn(next_fulfillment);
-        }
-
-        debug_assert_eq!(fulfillment.count, 0);
     }
 
     fn release_many(&self, release_head: BufferPtr, release_count: usize) {
         let local = self.local();
+        let prev_local_count = local.count.get();
 
         // Find the local tail so we can add the extra buffers.
-        let prev_local_count = local.count.get();
         let mut tail = local.head.get();
         while let Some(next) = tail {
             let new_tail = unsafe { next.get_next() };
@@ -365,15 +327,10 @@ impl BufferPool {
             local.count.set(release_count as u32);
         }
 
-        let overflow_threshold = self.batch_size * 3 / 2;
-        debug_assert!(prev_local_count < overflow_threshold as u32);
-
+        // Always need to re-find the watermark since we appended the new buffers to the tail of
+        // the local stockpile.
         self.find_watermark(local);
         self.release_overflow(local);
-
-        debug_assert!(local.count.get() < self.batch_size as u32 * 3 / 2);
-
-        self.find_watermark(local);
     }
 
     fn find_watermark(&self, local: &Local) {
@@ -542,23 +499,21 @@ impl Drop for HeapBufferPool {
     }
 }
 
-impl Fulfillment<BufferPtr> {
-    // Note this can leave self in an invalid state if self.count == n, where afterwards self.count
-    // is 0. In that case, self must never be used again.
-    fn take(&mut self, n: u32) -> Self {
-        let head = self.inner;
-        let mut tail = head;
-        for _ in 1..n {
-            tail = unsafe { tail.get_next() }.unwrap();
-        }
+// Note this can leave self in an invalid state if self.count == n, where afterwards self.count
+// is 0. In that case, self must never be used again.
+fn take_fulfillment(fulfillment: &mut Fulfillment<BufferPtr>, n: u32) -> Fulfillment<BufferPtr> {
+    let head = fulfillment.inner;
+    let mut tail = head;
+    for _ in 1..n {
+        tail = unsafe { tail.get_next() }.unwrap();
+    }
 
-        self.inner = unsafe { tail.swap_next(None) }.unwrap_or(tail);
-        self.count -= n as usize;
+    fulfillment.inner = unsafe { tail.swap_next(None) }.unwrap_or(tail);
+    fulfillment.count -= n as usize;
 
-        Self {
-            inner: head,
-            count: n as usize,
-        }
+    Fulfillment {
+        inner: head,
+        count: n as usize,
     }
 }
 
@@ -602,6 +557,8 @@ impl Future for Acquire<'_> {
                 context,
                 || {
                     if let Some(local_head) = local.head.replace(None) {
+                        // This case can happen if waitq notify_one_local fails to notify the local
+                        // head.
                         Some(Fulfillment {
                             inner: local_head,
                             count: local.count.replace(0) as usize,
@@ -705,7 +662,7 @@ mod test {
         f.append(Fulfillment { inner: b, count: 1});
         f.append(Fulfillment { inner: c, count: 1});
 
-        let taken = f.take(2);
+        let taken = take_fulfillment(&mut f, 2);
         assert_eq!((taken.inner, taken.count), (a, 2));
         assert_eq!((f.inner, f.count), (c, 1));
         assert_eq!(unsafe { a.swap_next(None) }, Some(b));
@@ -740,56 +697,6 @@ mod test {
             assert_eq!(b.send_bulk(1), 1);
             b.receive(1);
             b.release_ref(1);
-        }
-    }
-
-    #[test]
-    fn test_notify_waiters() {
-        let batch_count = 16;
-        let batch_size = 16;
-        let buffer_pool = HeapBufferPool::new(16, batch_count, batch_size);
-
-        let a = buffer_pool.try_acquire().unwrap();
-        let b = buffer_pool.try_acquire().unwrap();
-        let c = buffer_pool.try_acquire().unwrap();
-        let d = buffer_pool.try_acquire().unwrap();
-        let e = buffer_pool.try_acquire().unwrap();
-
-        let mut f = Fulfillment { inner: a, count: 1 };
-        f.append(Fulfillment { inner: b, count: 1});
-        f.append(Fulfillment { inner: c, count: 1});
-        f.append(Fulfillment { inner: d, count: 1});
-        f.append(Fulfillment { inner: e, count: 1});
-
-        let mut notified_count = 0;
-        let calls = [
-            (a, 3),
-            (d, 1),
-            (e, 1),
-        ];
-        BufferPool::notify_waiters(f.inner, f.count as usize, 3, |f| {
-            assert_eq!((f.inner, f.count), calls[notified_count]);
-            assert_eq!(f.inner.count(), f.count as usize);
-            notified_count += 1;
-        });
-        assert_eq!(notified_count, calls.len());
-
-        // Take apart the fulfillment batches created by notify_waiters to avoid debug sanity check
-        // panic in BufferPool::release.
-        unsafe {
-            a.set_next(None);
-            b.set_next(None);
-            c.set_next(None);
-            d.set_next(None);
-            e.set_next(None);
-        };
-
-        unsafe {
-            buffer_pool.release(a);
-            buffer_pool.release(b);
-            buffer_pool.release(c);
-            buffer_pool.release(d);
-            buffer_pool.release(e);
         }
     }
 

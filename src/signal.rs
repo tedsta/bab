@@ -7,8 +7,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(any(feature = "std", feature = "alloc"))]
 use crossbeam_utils::atomic::AtomicCell;
-
-use crate::waiter_queue::WaiterQueue;
+use waitq::WaiterQueue;
 
 pub struct Signal {
     is_notified: AtomicBool,

@@ -7,6 +7,7 @@
 //       list if any subsequent writes occur.
 
 use core::{
+    cell::Cell,
     pin::Pin,
     sync::atomic::Ordering,
     task::{Context, Poll, Waker},
@@ -19,10 +20,10 @@ use alloc::sync::Arc;
 
 use crossbeam_utils::{Backoff, CachePadded};
 use spin::Mutex;
+use thid::ThreadLocal;
 
 use crate::{
     buffer::BufferPtr,
-    thread_local::ThreadLocal,
     BufferChain,
     Packet,
 };
@@ -38,7 +39,7 @@ pub fn new_writer_flusher() -> (WriterFlushSender, WriterFlushReceiver) {
     }));
     let writer_flush_sender = WriterFlushSender {
         shared: shared.clone(),
-        local_chain: Arc::new(ThreadLocal::new()),
+        local: Arc::new(ThreadLocal::new()),
     };
     let writer_flush_receiver = WriterFlushReceiver::new(shared);
 
@@ -69,19 +70,36 @@ impl Drop for WriterFlushShared {
     }
 }
 
+#[derive(Default)]
+struct SenderLocal {
+    unflushed_bytes: Cell<usize>,
+    chain: BufferChain,
+}
+
 #[derive(Clone)]
 pub struct WriterFlushSender {
     shared: Arc<Mutex<WriterFlushShared>>,
-    local_chain: Arc<ThreadLocal<CachePadded<BufferChain>>>,
+    local: Arc<ThreadLocal<CachePadded<SenderLocal>>>,
 }
 
 impl WriterFlushSender {
-    pub fn flush(&self) {
-        let local_chain = self.local_chain.get_or_default();
+    pub fn id(&self) -> u64 {
+        Arc::as_ptr(&self.shared) as _
+    }
 
-        let Some((head, tail)) = local_chain.take_all() else {
+    pub fn unflushed_bytes(&self) -> usize {
+        let local = self.local.get_or_default();
+        local.unflushed_bytes.get()
+    }
+
+    pub fn flush(&self) {
+        let local = self.local.get_or_default();
+
+        let Some((head, tail)) = local.chain.take_all() else {
             return;
         };
+
+        local.unflushed_bytes.set(0);
 
         let mut shared = self.shared.lock();
         if let Some((_, prev_shared_tail)) = &mut shared.head_tail {
@@ -125,11 +143,15 @@ impl WriterFlushSender {
             }
         }
 
+        let local = self.local.get_or_default();
+        local.unflushed_bytes.set(
+            local.unflushed_bytes.get() + ((new_write_cursor & WRITE_CURSOR_MASK) - write_start) as usize
+        );
+
         if write_start == 0 || write_cursor & WRITE_CURSOR_FLUSHED_FLAG != 0 {
             // This is the first write since the buffer was last flushed - add it to the flush
             // queue.
-            let local_chain = self.local_chain.get_or_default();
-            local_chain.push(buffer);
+            local.chain.push(buffer);
         }
     }
 
@@ -143,8 +165,8 @@ impl WriterFlushSender {
 
         buffer.write_cursor().store(len | WRITE_CURSOR_DONE, Ordering::Release);
 
-        let local_chain = self.local_chain.get_or_default();
-        local_chain.push(buffer);
+        let local = self.local.get_or_default();
+        local.chain.push(buffer);
     }
 
     /// Prepare a buffer to be flushed without actually flushing it.
