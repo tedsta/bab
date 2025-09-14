@@ -24,8 +24,8 @@ impl FreeStack {
 
     pub fn pop(&self) -> Option<BufferPtr> {
         let backoff = Backoff::new();
-        loop {
-            let count = self.count.load(Ordering::Relaxed);
+        let mut count = self.count.load(Ordering::Relaxed);
+        while count > 0 {
             match self.count.compare_exchange(
                 count,
                 count.saturating_sub(1),
@@ -33,7 +33,6 @@ impl FreeStack {
                 Ordering::Relaxed,
             ) {
                 // There are no available slots.
-                Ok(_) if count == 0 => break,
                 Ok(_) => {
                     // Successfully acquired a slot.
                     backoff.reset();
@@ -46,7 +45,10 @@ impl FreeStack {
                         backoff.snooze();
                     }
                 }
-                Err(_) => { }
+                Err(0) => break,
+                Err(new_count) => {
+                    count = new_count;
+                }
             }
             backoff.spin();
         }
@@ -56,8 +58,8 @@ impl FreeStack {
 
     pub fn push_if(&self, buffer: BufferPtr, mut condition: impl FnMut(usize) -> bool) -> bool {
         let backoff = Backoff::new();
+        let mut count = self.count.load(Ordering::Relaxed);
         loop {
-            let count = self.count.load(Ordering::Relaxed);
             if !condition(count) {
                 return false;
             }
@@ -84,7 +86,9 @@ impl FreeStack {
                     }
                     return true;
                 }
-                Err(_) => { }
+                Err(new_count) => {
+                    count = new_count;
+                }
             }
             backoff.spin();
         }
