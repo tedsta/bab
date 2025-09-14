@@ -141,7 +141,7 @@ impl BufferPool {
     /// dropped. This is purely an optimization and is optional to do. It prevents an atomic
     /// reference count from being unnecessarily incremented and decremented when buffers are
     /// received and released by this thread.
-    pub fn register_thread(&self) -> BufferPoolThreadGuard {
+    pub fn register_thread(&self) -> BufferPoolThreadGuard<'_> {
         self.increment_local_buffers_in_use(self.local());
         BufferPoolThreadGuard {
             buffer_pool: self,
@@ -303,7 +303,6 @@ impl BufferPool {
 
     fn release_many(&self, release_head: BufferPtr, release_count: usize) {
         let local = self.local();
-        let prev_local_count = local.count.get();
 
         // Find the local tail so we can add the extra buffers.
         let mut tail = local.head.get();
@@ -499,24 +498,6 @@ impl Drop for HeapBufferPool {
     }
 }
 
-// Note this can leave self in an invalid state if self.count == n, where afterwards self.count
-// is 0. In that case, self must never be used again.
-fn take_fulfillment(fulfillment: &mut Fulfillment<BufferPtr>, n: u32) -> Fulfillment<BufferPtr> {
-    let head = fulfillment.inner;
-    let mut tail = head;
-    for _ in 1..n {
-        tail = unsafe { tail.get_next() }.unwrap();
-    }
-
-    fulfillment.inner = unsafe { tail.swap_next(None) }.unwrap_or(tail);
-    fulfillment.count -= n as usize;
-
-    Fulfillment {
-        inner: head,
-        count: n as usize,
-    }
-}
-
 impl IFulfillment for BufferPtr {
     fn take_one(&mut self) -> Self {
         let ptr = *self;
@@ -645,34 +626,6 @@ mod test {
 
         for buffer in [a, b, c] {
             unsafe { buffer.release_ref(1); }
-        }
-    }
-
-    #[test]
-    fn test_buffer_fulfillment_take() {
-        let batch_count = 16;
-        let batch_size = 16;
-        let buffer_pool = HeapBufferPool::new(16, batch_count, batch_size);
-
-        let a = buffer_pool.try_acquire().unwrap();
-        let b = buffer_pool.try_acquire().unwrap();
-        let c = buffer_pool.try_acquire().unwrap();
-
-        let mut f = Fulfillment { inner: a, count: 1 };
-        f.append(Fulfillment { inner: b, count: 1});
-        f.append(Fulfillment { inner: c, count: 1});
-
-        let taken = take_fulfillment(&mut f, 2);
-        assert_eq!((taken.inner, taken.count), (a, 2));
-        assert_eq!((f.inner, f.count), (c, 1));
-        assert_eq!(unsafe { a.swap_next(None) }, Some(b));
-        assert_eq!(unsafe { b.get_next() }, None);
-        assert_eq!(unsafe { c.get_next() }, None);
-
-        unsafe {
-            buffer_pool.release(a);
-            buffer_pool.release(b);
-            buffer_pool.release(c);
         }
     }
 

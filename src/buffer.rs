@@ -31,20 +31,20 @@ impl BufferPtr {
     }
 
     #[inline]
-    pub unsafe fn slice(&self, range: core::ops::Range<usize>) -> &[u8] {
+    pub unsafe fn slice(&self, range: core::ops::Range<usize>) -> &[u8] { unsafe {
         core::slice::from_raw_parts(
             self.data().add(range.start),
             range.end - range.start,
         )
-    }
+    }}
 
     #[inline]
-    pub unsafe fn slice_mut(&self, range: core::ops::Range<usize>) -> &mut [u8] {
+    pub unsafe fn slice_mut(&self, range: core::ops::Range<usize>) -> &mut [u8] { unsafe {
         core::slice::from_raw_parts_mut(
             self.data().add(range.start),
             range.end - range.start,
         )
-    }
+    }}
 
     /// SAFETY: this method must not be called concurrently from multiple threads.
     pub unsafe fn set_next(&self, next: Option<Self>) {
@@ -114,9 +114,9 @@ impl BufferPtr {
     /// count and decrements the thread-local reference count.
     ///
     /// Returns the `shared_rc_contribution` value that the receiving thread should add to its own.
-    pub unsafe fn send(&self) -> u32 {
+    pub unsafe fn send(&self) -> u32 { unsafe {
         self.send_bulk(1)
-    }
+    }}
 
     /// Used when converting a LocalPacket into a sendable Packet. Increments the shared reference
     /// count and decrements the thread-local reference count.
@@ -291,9 +291,9 @@ impl BufferPtr {
         &self.as_ref().write_cursor
     }
 
-    pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 {
+    pub(crate) unsafe fn flush_cursor_mut(&self) -> &mut u32 { unsafe {
         &mut *self.as_ref().flush_cursor.get()
-    }
+    }}
 
     #[cfg(test)]
     pub(crate) fn count(&self) -> usize {
@@ -335,7 +335,7 @@ impl Buffer {
         buffer_pool: *const BufferPool,
         buffer_id: usize,
         capacity: usize,
-    ) {
+    ) { unsafe {
         use core::ptr::addr_of_mut;
 
         addr_of_mut!((*buffer).buffer_pool).write(buffer_pool);
@@ -346,5 +346,5 @@ impl Buffer {
         addr_of_mut!((*buffer).flush_cursor).write(UnsafeCell::new(0));
         addr_of_mut!((*buffer).ref_count).write(AtomicU32::new(0));
         Self::data(buffer).write_bytes(0, capacity);
-    }
+    }}
 }
