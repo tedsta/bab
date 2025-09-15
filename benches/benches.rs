@@ -1,4 +1,4 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn set_core_affinity(_: &mut Criterion) {
     core_affinity::set_for_current(core_affinity::CoreId { id: 1 });
@@ -46,7 +46,9 @@ fn buffer_pool_acquire_release_1033_x1000(c: &mut Criterion) {
             pollster::block_on(async {
                 for _ in 0..1000 {
                     let buffer = buffer_pool.acquire().await;
-                    unsafe { buffer_pool.release(buffer); }
+                    unsafe {
+                        buffer_pool.release(buffer);
+                    }
                 }
             });
         })
@@ -60,55 +62,21 @@ fn framer_x1000(c: &mut Criterion) {
     let mut framer = bab::Framer::new(buffer_pool);
 
     c.bench_function("framer_x1000", |b| {
-        b.iter(|| pollster::block_on(async {
-            for _ in 0..1000 {
-                let buf: &mut [u8] = framer.write().await;
-                buf[..write_payload.len()].copy_from_slice(&write_payload);
-                framer.commit(write_payload.len());
-
-                let _packet = if framer.remaining_on_buffer() < write_payload.len() {
-                    framer.next_buffer().unwrap()
-                } else {
-                    framer.finish_frame().unwrap()
-                };
-            }
-        }))
-    });
-}
-
-fn get_current_thread_initial_1000x(c: &mut Criterion) {
-    c.bench_function("get_current_thread_initial_1000x", |b| {
         b.iter(|| {
-            for _ in 0..1000 {
-                core::hint::black_box(bab::thread_id::current());
-                // Reset the local thread ID for the next run
-                bab::thread_id::clear();
-            }
-        });
-    });
-}
+            pollster::block_on(async {
+                for _ in 0..1000 {
+                    let buf: &mut [u8] = framer.write().await;
+                    buf[..write_payload.len()].copy_from_slice(&write_payload);
+                    framer.commit(write_payload.len());
 
-fn get_current_thread_id_1000x(c: &mut Criterion) {
-    bab::thread_id::current();
-
-    c.bench_function("get_current_thread_id_1000x", |b| {
-        b.iter(|| {
-            for _ in 0..1000 {
-                core::hint::black_box(bab::thread_id::current());
-            }
-        });
-    });
-}
-
-fn get_current_thread_id_std_1000x(c: &mut Criterion) {
-    bab::thread_id::current();
-
-    c.bench_function("get_current_thread_id_std_1000x", |b| {
-        b.iter(|| {
-            for _ in 0..1000 {
-                core::hint::black_box(std::thread::current().id());
-            }
-        });
+                    let _packet = if framer.remaining_on_buffer() < write_payload.len() {
+                        framer.next_buffer().unwrap()
+                    } else {
+                        framer.finish_frame().unwrap()
+                    };
+                }
+            })
+        })
     });
 }
 
@@ -121,6 +89,5 @@ criterion_group! {
         framer_x1000,
         malloc_free_vec1033_x1000,
         buffer_pool_acquire_release_1033_x1000,
-        get_current_thread_initial_1000x, get_current_thread_id_1000x, get_current_thread_id_std_1000x,
 }
 criterion_main!(benches);
