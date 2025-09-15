@@ -88,7 +88,7 @@ impl BufferPtr {
     pub unsafe fn initialize_rc(&self, count: u32, local_shared: u32, shared: u32) {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         debug_assert_eq!(buffer_local.ref_count.get(), 0);
@@ -120,7 +120,7 @@ impl BufferPtr {
     pub unsafe fn send_bulk(&self, count: u32) -> u32 {
         // SAFETY: memory behind buffer_pool is never mutably accessed.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         debug_assert!(buffer_local.ref_count.get() > 0);
@@ -167,7 +167,7 @@ impl BufferPtr {
     pub unsafe fn receive(&self, shared_rc_contribution: u32) {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         let prev_local_rc = buffer_local
@@ -186,7 +186,7 @@ impl BufferPtr {
     pub unsafe fn take_ref(&self, count: u32) -> u32 {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         let prev_rc = buffer_local.ref_count.get();
@@ -199,7 +199,7 @@ impl BufferPtr {
     pub unsafe fn take_shared_ref(&self, count: u32) {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         let prev_rc = buffer_local.ref_count.get();
@@ -217,7 +217,7 @@ impl BufferPtr {
     pub unsafe fn release_ref(&self, count: u32) {
         // SAFETY: BufferPool and Buffer are never mutably referenced.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         debug_assert!(buffer_local.ref_count.get() >= count);
@@ -252,7 +252,7 @@ impl BufferPtr {
         // If we've made it this far, it's time to release the buffer back into the pool.
 
         // We don't release the buffer if the pool is already shutting down. We do this so that
-        // BufferPool::shutdown_now_try_drop has unique access to all threads' local buffers cache.
+        // BufferPool::shutdown_now_try_drop has unique access to all threads' local_stock.
         if shutdown_status != BufferPoolShutdownStatus::AlreadyShutdown {
             unsafe {
                 buffer_pool.release(*self);
@@ -264,7 +264,7 @@ impl BufferPtr {
                 BufferPool::shutdown_now_try_drop(buffer_pool_ptr as *mut _);
             }
             BufferPoolShutdownStatus::AlreadyShutdown => {
-                BufferPool::already_shutdown_try_drop(buffer_pool_ptr as *mut _);
+                BufferPool::already_shutdown_release_buffer(buffer_pool_ptr as *mut _);
             }
             BufferPoolShutdownStatus::NotShutdown => {}
         }
@@ -288,7 +288,7 @@ impl BufferPtr {
     // make BufferPtr a proper owned handle.
     pub(crate) fn get_local_rc(&self) -> u32 {
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         local.local_buffer_state(buffer.buffer_id).ref_count.get()
     }
 

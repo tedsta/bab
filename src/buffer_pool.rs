@@ -25,17 +25,46 @@ use crate::{
     free_stack::FreeStack,
 };
 
-pub(crate) struct Local {
+pub(crate) struct LocalStock {
     head: Cell<Option<BufferPtr>>,
     watermark: Cell<Option<BufferPtr>>,
     count: Cell<u32>,
+}
+
+unsafe impl Send for LocalStock {}
+
+impl LocalStock {
+    fn new() -> Self {
+        Self {
+            head: Cell::new(None),
+            watermark: Cell::new(None),
+            count: Cell::new(0),
+        }
+    }
+
+    fn try_acquire(&self) -> Option<BufferPtr> {
+        self.head.get().map(|head_ptr| {
+            // We can take a buffer from the local batch - advance the local head and return.
+            debug_assert!(self.count.get() > 0);
+            self.count.set(self.count.get() - 1);
+            self.head.set(unsafe { head_ptr.get_next() });
+            unsafe {
+                head_ptr.set_next(None);
+            }
+
+            head_ptr
+        })
+    }
+}
+
+pub(crate) struct LocalState {
     buffers_in_use: Cell<u32>,
     local_buffer_state: *const [LocalBufferState],
 }
 
-unsafe impl Send for Local {}
+unsafe impl Send for LocalState {}
 
-impl Local {
+impl LocalState {
     #[cfg(any(feature = "std", feature = "alloc"))]
     fn new_heap(total_buffer_count: usize) -> Self {
         let local_buffer_state = Box::into_raw(
@@ -49,28 +78,9 @@ impl Local {
         );
 
         Self {
-            head: Cell::new(None),
-            watermark: Cell::new(None),
-            count: Cell::new(0),
             buffers_in_use: Cell::new(0),
             local_buffer_state,
         }
-    }
-}
-
-impl Local {
-    fn try_acquire(&self) -> Option<BufferPtr> {
-        self.head.get().map(|head_ptr| {
-            // We can take a buffer from the local batch - advance the local head and return.
-            debug_assert!(self.count.get() > 0);
-            self.count.set(self.count.get() - 1);
-            self.head.set(unsafe { head_ptr.get_next() });
-            unsafe {
-                head_ptr.set_next(None);
-            }
-
-            head_ptr
-        })
     }
 
     #[inline]
@@ -95,7 +105,8 @@ pub struct BufferPool {
     free_stack: FreeStack,
     waiter_queue: WaiterQueue<BufferPtr>,
     // Unfortunately needs to be in an UnsafeCell so that we can mutably access it during shutdown.
-    local: UnsafeCell<ThreadLocal<CachePadded<Local>>>,
+    local_stock: UnsafeCell<ThreadLocal<CachePadded<LocalStock>>>,
+    local_state: ThreadLocal<CachePadded<LocalState>>,
     ref_count: AtomicUsize,
     shutdown_released_buffers: AtomicU32,
     handle_drop_fn: fn(*mut Self),
@@ -116,7 +127,7 @@ pub struct BufferPoolThreadGuard<'a> {
 impl Drop for BufferPoolThreadGuard<'_> {
     fn drop(&mut self) {
         self.buffer_pool
-            .decrement_local_buffers_in_use(self.buffer_pool.local());
+            .decrement_local_buffers_in_use(self.buffer_pool.local_state());
     }
 }
 
@@ -145,29 +156,56 @@ impl BufferPool {
     /// reference count from being unnecessarily incremented and decremented when buffers are
     /// received and released by this thread.
     pub fn register_thread(&self) -> BufferPoolThreadGuard<'_> {
-        self.increment_local_buffers_in_use(self.local());
+        self.increment_local_buffers_in_use(self.local_state());
         BufferPoolThreadGuard { buffer_pool: self }
     }
 
     #[inline]
-    pub(crate) fn local(&self) -> &Local {
-        let local = unsafe { &*self.local.get() };
-        local.get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
+    pub(crate) fn local_stock(&self) -> &LocalStock {
+        let local_stock = unsafe { &*self.local_stock.get() };
+        local_stock.get_or(|| CachePadded::new(LocalStock::new()))
     }
 
-    pub(crate) fn increment_local_buffers_in_use(&self, local: &Local) {
-        let prev = local.buffers_in_use.replace(local.buffers_in_use.get() + 1);
+    #[inline]
+    pub(crate) fn local_state(&self) -> &LocalState {
+        self.local_state
+            .get_or(|| CachePadded::new(LocalState::new_heap(self.total_buffer_count as usize)))
+    }
+
+    pub(crate) fn increment_local_buffers_in_use(&self, local_state: &LocalState) {
+        let prev = local_state.buffers_in_use.replace(local_state.buffers_in_use.get() + 1);
         if prev == 0 {
-            if !self.is_shutting_down() {
-                self.ref_count.fetch_add(1, Ordering::Relaxed);
+            let mut ref_count = self.ref_count.load(Ordering::Relaxed);
+            // Only attempt to acquire a reference if the BufferPool isn't already shutting down.
+            while ref_count > 0 {
+                match self
+                    .ref_count
+                    .compare_exchange(
+                        ref_count,
+                        ref_count + 1,
+                        Ordering::AcqRel,
+                        Ordering::Relaxed,
+                    )
+                {
+                    // Successfully acquired reference to BufferPool.
+                    Ok(_) => break,
+                    Err(new_ref_count) => {
+                        ref_count = new_ref_count;
+                    }
+                }
             }
         }
     }
 
     /// Returns true if the buffer pool is shutting down.
-    pub(crate) fn decrement_local_buffers_in_use(&self, local: &Local) -> BufferPoolShutdownStatus {
-        let prev = local.buffers_in_use.replace(local.buffers_in_use.get() - 1);
+    pub(crate) fn decrement_local_buffers_in_use(
+        &self,
+        local_state: &LocalState,
+    ) -> BufferPoolShutdownStatus {
+        let prev = local_state.buffers_in_use.replace(local_state.buffers_in_use.get() - 1);
         if prev == 1 {
+            // This thread no longer has any buffers from this pool in circulation.
+
             if !self.is_shutting_down() {
                 let prev_ref_count = self.ref_count.fetch_sub(1, Ordering::AcqRel);
                 if prev_ref_count == 1 {
@@ -175,18 +213,16 @@ impl BufferPool {
                     // be some unreleased buffers, but they will all be buffers sent from one thread
                     // and not yet received by their destination thread.
                     //
-                    // It's important that after the fetch_sub above, `self.local` won't be written
-                    // to ever again by any thread, and any thread that reads the ref_count == 0
-                    // value sees the latest self.local.count values. This is why we use AcqRel
-                    // ordering in the fetch_sub above, and Acquire ordering in
+                    // It's important that after the fetch_sub above, `self.local_stock` won't be
+                    // written to ever again by any thread, and any thread that reads the
+                    // ref_count == 0 value sees the latest self.local_stock.count values. This is
+                    // why we use AcqRel ordering in the fetch_sub above, and Acquire ordering in
                     // BufferPool::is_shutting_down.
                     BufferPoolShutdownStatus::ShutdownNow
                 } else {
                     BufferPoolShutdownStatus::NotShutdown
                 }
             } else {
-                self.shutdown_released_buffers
-                    .fetch_add(1, Ordering::Relaxed);
                 BufferPoolShutdownStatus::AlreadyShutdown
             }
         } else {
@@ -194,7 +230,7 @@ impl BufferPool {
         }
     }
 
-    pub(crate) fn is_shutting_down(&self) -> bool {
+    fn is_shutting_down(&self) -> bool {
         match self
             .ref_count
             .compare_exchange(0, 0, Ordering::Acquire, Ordering::Relaxed)
@@ -220,30 +256,30 @@ impl BufferPool {
     }
 
     pub fn try_acquire(&self) -> Option<BufferPtr> {
-        let local = self.local();
-        if let Some(local_buffer) = local.try_acquire() {
+        let local_stock = self.local_stock();
+        if let Some(local_buffer) = local_stock.try_acquire() {
             return Some(local_buffer);
         }
 
-        self.try_acquire_batch(local)
+        self.try_acquire_batch(local_stock)
     }
 
-    fn try_acquire_batch(&self, local: &Local) -> Option<BufferPtr> {
-        debug_assert!(local.head.get().is_none());
-        debug_assert_eq!(local.count.get(), 0);
+    fn try_acquire_batch(&self, local_stock: &LocalStock) -> Option<BufferPtr> {
+        debug_assert!(local_stock.head.get().is_none());
+        debug_assert_eq!(local_stock.count.get(), 0);
 
-        if let Some(batch_head) = self.try_take_batch(local) {
-            local.head.set(unsafe { batch_head.swap_next(None) });
-            local.count.set(self.batch_size as u32 - 1);
+        if let Some(batch_head) = self.try_take_batch(local_stock) {
+            local_stock.head.set(unsafe { batch_head.swap_next(None) });
+            local_stock.count.set(self.batch_size as u32 - 1);
             Some(batch_head)
         } else {
             None
         }
     }
 
-    fn try_take_batch(&self, local: &Local) -> Option<BufferPtr> {
-        debug_assert!(local.head.get().is_none());
-        debug_assert_eq!(local.count.get(), 0);
+    fn try_take_batch(&self, local_stock: &LocalStock) -> Option<BufferPtr> {
+        debug_assert!(local_stock.head.get().is_none());
+        debug_assert_eq!(local_stock.count.get(), 0);
 
         self.free_stack.pop()
     }
@@ -255,33 +291,33 @@ impl BufferPool {
             return;
         }
 
-        let local = self.local();
+        let local_stock = self.local_stock();
 
         // Release the buffer into local stock
-        if local.count.get() == self.batch_size {
+        if local_stock.count.get() == self.batch_size {
             // Store the local batch watermark
-            local.watermark.set(Some(buffer));
+            local_stock.watermark.set(Some(buffer));
         }
         unsafe {
-            buffer.set_next(local.head.get());
+            buffer.set_next(local_stock.head.get());
         }
-        local.head.set(Some(buffer));
-        local.count.set(local.count.get() + 1);
+        local_stock.head.set(Some(buffer));
+        local_stock.count.set(local_stock.count.get() + 1);
 
-        self.release_overflow(local);
+        self.release_overflow(local_stock);
     }
 
-    fn release_overflow(&self, local: &Local) {
-        if local.count.get() < (self.batch_size as u32 * 3) / 2 {
+    fn release_overflow(&self, local_stock: &LocalStock) {
+        if local_stock.count.get() < (self.batch_size as u32 * 3) / 2 {
             return;
         }
 
         // Release batch
 
-        while let Some(watermark) = local.watermark.take() {
+        while let Some(watermark) = local_stock.watermark.take() {
             let release_head = unsafe { watermark.swap_next(None) }.unwrap();
             let release_count = self.batch_size;
-            local.count.set(local.count.get() - self.batch_size as u32);
+            local_stock.count.set(local_stock.count.get() - self.batch_size as u32);
 
             let mut waiter_queue_guard = None;
             self.free_stack.push_if(release_head, |free_count| {
@@ -304,15 +340,15 @@ impl BufferPool {
             });
             // TODO there's a more efficient way to do this than re-chasing all the pointers every
             // time around.
-            self.find_watermark(local);
+            self.find_watermark(local_stock);
         }
     }
 
     fn release_many(&self, release_head: BufferPtr, release_count: usize) {
-        let local = self.local();
+        let local_stock = self.local_stock();
 
         // Find the local tail so we can add the extra buffers.
-        let mut tail = local.head.get();
+        let mut tail = local_stock.head.get();
         while let Some(next) = tail {
             let new_tail = unsafe { next.get_next() };
             if new_tail.is_none() {
@@ -326,68 +362,73 @@ impl BufferPool {
             unsafe {
                 tail.set_next(Some(release_head));
             }
-            local.count.set(local.count.get() + release_count as u32);
+            local_stock.count.set(local_stock.count.get() + release_count as u32);
         } else {
             // Local stockpile is empty.
-            debug_assert_eq!(local.head.get(), None);
-            debug_assert_eq!(local.count.get(), 0);
-            local.head.set(Some(release_head));
-            local.count.set(release_count as u32);
+            debug_assert_eq!(local_stock.head.get(), None);
+            debug_assert_eq!(local_stock.count.get(), 0);
+            local_stock.head.set(Some(release_head));
+            local_stock.count.set(release_count as u32);
         }
 
         // Always need to re-find the watermark since we appended the new buffers to the tail of
         // the local stockpile.
-        self.find_watermark(local);
-        self.release_overflow(local);
+        self.find_watermark(local_stock);
+        self.release_overflow(local_stock);
     }
 
-    fn find_watermark(&self, local: &Local) {
-        if local.count.get() > self.batch_size as u32 {
-            let mut watermark = local.head.get().unwrap();
-            for _ in 0..local.count.get() - self.batch_size as u32 - 1 {
+    fn find_watermark(&self, local_stock: &LocalStock) {
+        if local_stock.count.get() > self.batch_size as u32 {
+            let mut watermark = local_stock.head.get().unwrap();
+            for _ in 0..local_stock.count.get() - self.batch_size as u32 - 1 {
                 watermark = unsafe { watermark.get_next() }.unwrap();
             }
-            local.watermark.set(Some(watermark));
+            local_stock.watermark.set(Some(watermark));
         }
     }
 
     pub(crate) fn shutdown_now_try_drop(buffer_pool: *mut BufferPool) {
         let this = unsafe { &*buffer_pool };
         // SAFETY: Once buffer_pool.ref_count == 0, only the site that last decremented ref_count
-        // will call `shutdown_now_try_drop`, and no other code will access buffer_pool.local.
-        let local = unsafe { &mut *this.local.get() };
+        // will call `shutdown_now_try_drop`, and no other code will access buffer_pool.local_stock.
+        let local_stock = unsafe { &mut *this.local_stock.get() };
 
         let mut released_buffers = 0;
-        for local in local.iter_mut() {
-            assert_eq!(local.buffers_in_use.get(), 0);
-            released_buffers += local.count.get();
+        for local_stock in local_stock.iter_mut() {
+            released_buffers += local_stock.count.get();
         }
         while let Some(_) = this.free_stack.pop() {
             released_buffers += this.batch_size;
         }
+
+        // Stash total_buffer_count so we can use it later - once we add the released_buffers to
+        // this.shutdown_released_buffers, we aren't allowed to access `this` since another
+        // thread can drop it (until we confirm that didn't happen).
+        let total_buffer_count = this.total_buffer_count as u32;
+
         let prev_released_buffers = this
             .shutdown_released_buffers
             .fetch_add(released_buffers, Ordering::Relaxed);
 
-        if prev_released_buffers + released_buffers == this.total_buffer_count as u32 {
+        if prev_released_buffers + released_buffers == total_buffer_count {
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
         }
     }
 
-    pub(crate) fn already_shutdown_try_drop(buffer_pool: *mut BufferPool) {
+    pub(crate) fn already_shutdown_release_buffer(buffer_pool: *mut BufferPool) {
         let this = unsafe { &*buffer_pool };
-        if this
-            .shutdown_released_buffers
-            .compare_exchange(
-                this.total_buffer_count as u32,
-                this.total_buffer_count as u32,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            )
-            .is_ok()
-        {
+
+        // Stash total_buffer_count so we can use it later - once we increment
+        // this.shutdown_released_buffers, we aren't allowed to access `this` since another
+        // thread can drop it (until we confirm that didn't happen).
+        let total_buffer_count = this.total_buffer_count as u32;
+
+        let prev_released_buffers = this.shutdown_released_buffers
+            .fetch_add(1, Ordering::Relaxed);
+
+        if prev_released_buffers + 1 == total_buffer_count as u32 {
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
@@ -397,12 +438,9 @@ impl BufferPool {
 
 impl Drop for BufferPool {
     fn drop(&mut self) {
-        // SAFETY: we have `&mut self`.
-        let local = unsafe { &mut *self.local.get() };
-
         // Drop all local buffer state arrays
-        for local in local.iter_mut() {
-            let _ = unsafe { Box::from_raw(local.local_buffer_state as *mut [LocalBufferState]) };
+        for local_state in self.local_state.iter_mut() {
+            let _ = unsafe { Box::from_raw(local_state.local_buffer_state as *mut [LocalBufferState]) };
         }
 
         let _ = unsafe { dealloc(self.alloc as *mut u8, self.alloc_layout) };
@@ -444,7 +482,8 @@ impl HeapBufferPool {
             total_buffer_count,
             buffer_size,
             batch_size: batch_size as u32,
-            local: UnsafeCell::new(ThreadLocal::new()),
+            local_stock: UnsafeCell::new(ThreadLocal::new()),
+            local_state: ThreadLocal::new(),
             ref_count: AtomicUsize::new(1),
             shutdown_released_buffers: AtomicU32::new(0),
             handle_drop_fn: |buffer_pool| {
@@ -518,7 +557,7 @@ impl Drop for HeapBufferPool {
     fn drop(&mut self) {
         let prev_rc = self.ref_count.fetch_sub(1, Ordering::Release);
         if prev_rc == 1 {
-            // Enforce that that any possible access to self from another thread *happens before*
+            // Enforce that that any previous access to self from another thread *happens before*
             // deleting the object on this thread.
             // See comment in source of `Arc::drop`.
             self.ref_count.load(Ordering::Acquire);
@@ -565,17 +604,17 @@ impl Future for Acquire<'_> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let buffer_pool = self.buffer_pool;
-        let local = self.buffer_pool.local();
+        let local_stock = self.buffer_pool.local_stock();
         let Poll::Ready(fulfillment) = self.as_ref().waiter().poll_fulfillment(context, || {
-            if let Some(local_head) = local.head.replace(None) {
+            if let Some(local_head) = local_stock.head.replace(None) {
                 // This case can happen if waitq notify_one_local fails to notify the local
                 // head.
                 Some(Fulfillment {
                     inner: local_head,
-                    count: local.count.replace(0) as usize,
+                    count: local_stock.count.replace(0) as usize,
                 })
             } else {
-                buffer_pool.try_take_batch(local).map(|ptr| Fulfillment {
+                buffer_pool.try_take_batch(local_stock).map(|ptr| Fulfillment {
                     inner: ptr,
                     count: buffer_pool.batch_size as usize,
                 })
