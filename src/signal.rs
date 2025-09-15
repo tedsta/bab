@@ -55,6 +55,9 @@ struct SignalTreeNode {
     parent: spin::Mutex<SignalTreeNodeParent>,
 }
 
+unsafe impl Send for SignalTreeNode {}
+unsafe impl Sync for SignalTreeNode {}
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 struct SignalTreeNodeParent {
     parent: Weak<SignalTreeNode>,

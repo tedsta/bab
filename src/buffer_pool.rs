@@ -173,20 +173,19 @@ impl BufferPool {
     }
 
     pub(crate) fn increment_local_buffers_in_use(&self, local_state: &LocalState) {
-        let prev = local_state.buffers_in_use.replace(local_state.buffers_in_use.get() + 1);
+        let prev = local_state
+            .buffers_in_use
+            .replace(local_state.buffers_in_use.get() + 1);
         if prev == 0 {
             let mut ref_count = self.ref_count.load(Ordering::Relaxed);
             // Only attempt to acquire a reference if the BufferPool isn't already shutting down.
             while ref_count > 0 {
-                match self
-                    .ref_count
-                    .compare_exchange(
-                        ref_count,
-                        ref_count + 1,
-                        Ordering::AcqRel,
-                        Ordering::Relaxed,
-                    )
-                {
+                match self.ref_count.compare_exchange(
+                    ref_count,
+                    ref_count + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
                     // Successfully acquired reference to BufferPool.
                     Ok(_) => break,
                     Err(new_ref_count) => {
@@ -202,7 +201,9 @@ impl BufferPool {
         &self,
         local_state: &LocalState,
     ) -> BufferPoolShutdownStatus {
-        let prev = local_state.buffers_in_use.replace(local_state.buffers_in_use.get() - 1);
+        let prev = local_state
+            .buffers_in_use
+            .replace(local_state.buffers_in_use.get() - 1);
         if prev == 1 {
             // This thread no longer has any buffers from this pool in circulation.
 
@@ -317,7 +318,9 @@ impl BufferPool {
         while let Some(watermark) = local_stock.watermark.take() {
             let release_head = unsafe { watermark.swap_next(None) }.unwrap();
             let release_count = self.batch_size;
-            local_stock.count.set(local_stock.count.get() - self.batch_size as u32);
+            local_stock
+                .count
+                .set(local_stock.count.get() - self.batch_size as u32);
 
             let mut waiter_queue_guard = None;
             self.free_stack.push_if(release_head, |free_count| {
@@ -362,7 +365,9 @@ impl BufferPool {
             unsafe {
                 tail.set_next(Some(release_head));
             }
-            local_stock.count.set(local_stock.count.get() + release_count as u32);
+            local_stock
+                .count
+                .set(local_stock.count.get() + release_count as u32);
         } else {
             // Local stockpile is empty.
             debug_assert_eq!(local_stock.head.get(), None);
@@ -408,9 +413,14 @@ impl BufferPool {
 
         let prev_released_buffers = this
             .shutdown_released_buffers
-            .fetch_add(released_buffers, Ordering::Relaxed);
+            .fetch_add(released_buffers, Ordering::Release);
 
         if prev_released_buffers + released_buffers == total_buffer_count {
+            // Enforce that that any previous access to self from another thread *happens before*
+            // deleting the object on this thread.
+            // See comment in source of `Arc::drop`.
+            this.shutdown_released_buffers.load(Ordering::Acquire);
+
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
@@ -425,10 +435,16 @@ impl BufferPool {
         // thread can drop it (until we confirm that didn't happen).
         let total_buffer_count = this.total_buffer_count as u32;
 
-        let prev_released_buffers = this.shutdown_released_buffers
-            .fetch_add(1, Ordering::Relaxed);
+        let prev_released_buffers = this
+            .shutdown_released_buffers
+            .fetch_add(1, Ordering::Release);
 
         if prev_released_buffers + 1 == total_buffer_count as u32 {
+            // Enforce that that any previous access to self from another thread *happens before*
+            // deleting the object on this thread.
+            // See comment in source of `Arc::drop`.
+            this.shutdown_released_buffers.load(Ordering::Acquire);
+
             // All buffers have been released - time to drop
             let handle_drop_fn = unsafe { (*buffer_pool).handle_drop_fn };
             handle_drop_fn(buffer_pool as *mut BufferPool);
@@ -440,7 +456,8 @@ impl Drop for BufferPool {
     fn drop(&mut self) {
         // Drop all local buffer state arrays
         for local_state in self.local_state.iter_mut() {
-            let _ = unsafe { Box::from_raw(local_state.local_buffer_state as *mut [LocalBufferState]) };
+            let _ =
+                unsafe { Box::from_raw(local_state.local_buffer_state as *mut [LocalBufferState]) };
         }
 
         let _ = unsafe { dealloc(self.alloc as *mut u8, self.alloc_layout) };
@@ -614,10 +631,12 @@ impl Future for Acquire<'_> {
                     count: local_stock.count.replace(0) as usize,
                 })
             } else {
-                buffer_pool.try_take_batch(local_stock).map(|ptr| Fulfillment {
-                    inner: ptr,
-                    count: buffer_pool.batch_size as usize,
-                })
+                buffer_pool
+                    .try_take_batch(local_stock)
+                    .map(|ptr| Fulfillment {
+                        inner: ptr,
+                        count: buffer_pool.batch_size as usize,
+                    })
             }
         }) else {
             return Poll::Pending;
