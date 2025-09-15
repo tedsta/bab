@@ -1,6 +1,6 @@
 use core::{
     alloc::Layout,
-    cell::Cell,
+    cell::{Cell, UnsafeCell},
     future::Future,
     pin::Pin,
     sync::atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -94,7 +94,8 @@ pub struct BufferPool {
     batch_size: u32,
     free_stack: FreeStack,
     waiter_queue: WaiterQueue<BufferPtr>,
-    local: ThreadLocal<CachePadded<Local>>,
+    // Unfortunately needs to be in an UnsafeCell so that we can mutably access it during shutdown.
+    local: UnsafeCell<ThreadLocal<CachePadded<Local>>>,
     ref_count: AtomicUsize,
     shutdown_released_buffers: AtomicU32,
     handle_drop_fn: fn(*mut Self),
@@ -150,8 +151,8 @@ impl BufferPool {
 
     #[inline]
     pub(crate) fn local(&self) -> &Local {
-        self.local
-            .get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
+        let local = unsafe { &*self.local.get() };
+        local.get_or(|| CachePadded::new(Local::new_heap(self.total_buffer_count as usize)))
     }
 
     pub(crate) fn increment_local_buffers_in_use(&self, local: &Local) {
@@ -174,10 +175,10 @@ impl BufferPool {
                     // be some unreleased buffers, but they will all be buffers sent from one thread
                     // and not yet received by their destination thread.
                     //
-                    // It's important that after the fetch_sub above, self.local.count won't be
-                    // written to ever again by any thread, and any thread that reads the
-                    // ref_count == 0 value sees the latest self.local.count values. This is why we
-                    // use AcqRel ordering in the fetch_sub above, and Acquire ordering in
+                    // It's important that after the fetch_sub above, `self.local` won't be written
+                    // to ever again by any thread, and any thread that reads the ref_count == 0
+                    // value sees the latest self.local.count values. This is why we use AcqRel
+                    // ordering in the fetch_sub above, and Acquire ordering in
                     // BufferPool::is_shutting_down.
                     BufferPoolShutdownStatus::ShutdownNow
                 } else {
@@ -351,10 +352,13 @@ impl BufferPool {
     }
 
     pub(crate) fn shutdown_now_try_drop(buffer_pool: *mut BufferPool) {
-        let this = unsafe { &mut *buffer_pool };
+        let this = unsafe { &*buffer_pool };
+        // SAFETY: Once buffer_pool.ref_count == 0, only the site that last decremented ref_count
+        // will call `shutdown_now_try_drop`, and no other code will access buffer_pool.local.
+        let local = unsafe { &mut *this.local.get() };
 
         let mut released_buffers = 0;
-        for local in this.local.iter_mut() {
+        for local in local.iter_mut() {
             assert_eq!(local.buffers_in_use.get(), 0);
             released_buffers += local.count.get();
         }
@@ -393,8 +397,11 @@ impl BufferPool {
 
 impl Drop for BufferPool {
     fn drop(&mut self) {
+        // SAFETY: we have `&mut self`.
+        let local = unsafe { &mut *self.local.get() };
+
         // Drop all local buffer state arrays
-        for local in self.local.iter_mut() {
+        for local in local.iter_mut() {
             let _ = unsafe { Box::from_raw(local.local_buffer_state as *mut [LocalBufferState]) };
         }
 
@@ -437,7 +444,7 @@ impl HeapBufferPool {
             total_buffer_count,
             buffer_size,
             batch_size: batch_size as u32,
-            local: ThreadLocal::new(),
+            local: UnsafeCell::new(ThreadLocal::new()),
             ref_count: AtomicUsize::new(1),
             shutdown_released_buffers: AtomicU32::new(0),
             handle_drop_fn: |buffer_pool| {
@@ -509,8 +516,13 @@ impl Clone for HeapBufferPool {
 
 impl Drop for HeapBufferPool {
     fn drop(&mut self) {
-        let prev_rc = self.ref_count.fetch_sub(1, Ordering::Relaxed);
+        let prev_rc = self.ref_count.fetch_sub(1, Ordering::Release);
         if prev_rc == 1 {
+            // Enforce that that any possible access to self from another thread *happens before*
+            // deleting the object on this thread.
+            // See comment in source of `Arc::drop`.
+            self.ref_count.load(Ordering::Acquire);
+
             // All HeapBufferPool handles have been dropped.
             BufferPool::shutdown_now_try_drop(self.ptr as *mut _);
         }
