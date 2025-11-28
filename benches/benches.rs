@@ -80,6 +80,41 @@ fn framer_x1000(c: &mut Criterion) {
     });
 }
 
+fn clone_bytes_1033(c: &mut Criterion) {
+    let bytes = bytes::BytesMut::zeroed(1033).freeze();
+
+    c.bench_function("clone_bytes_1033", |b| {
+        b.iter(|| {
+            black_box(bytes.clone());
+        })
+    });
+}
+
+fn clone_rc_1033(c: &mut Criterion) {
+    let bytes = std::rc::Rc::new([0u8; 1033]);
+
+    c.bench_function("clone_rc_1033", |b| {
+        b.iter(|| {
+            black_box(bytes.clone());
+        })
+    });
+}
+
+fn clone_packet_1033(c: &mut Criterion) {
+    let buffer_pool = bab::HeapBufferPool::new(1033, 2, 2);
+    let mut framer = bab::Framer::new(buffer_pool);
+
+    let buf: &mut [u8] = framer.try_write().unwrap();
+    framer.commit(1033);
+    let packet = framer.next_buffer().unwrap();
+
+    c.bench_function("clone_packet_1033", |b| {
+        b.iter(|| {
+            black_box(packet.clone());
+        })
+    });
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default();
@@ -89,5 +124,8 @@ criterion_group! {
         framer_x1000,
         malloc_free_vec1033_x1000,
         buffer_pool_acquire_release_1033_x1000,
+        clone_bytes_1033,
+        clone_rc_1033,
+        clone_packet_1033,
 }
 criterion_main!(benches);
