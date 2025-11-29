@@ -89,7 +89,7 @@ impl LocalState {
     }
 }
 
-pub(crate) struct LocalBufferState {
+pub struct LocalBufferState {
     pub(crate) ref_count: Cell<u32>,
     pub(crate) shared_rc_contribution: Cell<u32>,
 }
@@ -738,7 +738,7 @@ mod test {
 
         unsafe {
             a.release_ref(1);
-            assert_eq!(b.send_bulk(1), 1);
+            assert_eq!(b.send(), 1);
             b.receive(1);
             b.release_ref(1);
         }

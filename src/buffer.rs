@@ -7,7 +7,10 @@ use core::{
 
 use crossbeam_utils::CachePadded;
 
-use crate::{BufferPool, buffer_pool::BufferPoolShutdownStatus};
+use crate::{
+    BufferPool,
+    buffer_pool::{BufferPoolShutdownStatus, LocalBufferState},
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferPtr {
@@ -109,19 +112,19 @@ impl BufferPtr {
     /// count and decrements the thread-local reference count.
     ///
     /// Returns the `shared_rc_contribution` value that the receiving thread should add to its own.
+    #[inline]
     pub unsafe fn send(&self) -> u32 {
-        unsafe { self.send_bulk(1) }
+        let buffer_local = unsafe { self.local_buffer_state() };
+        unsafe { self.send_bulk(buffer_local, 1) }
     }
 
     /// Used when converting a LocalPacket into a sendable Packet. Increments the shared reference
     /// count and decrements the thread-local reference count.
     ///
     /// Returns the `shared_rc_contribution` value that the receiving thread should add to its own.
-    pub unsafe fn send_bulk(&self, count: u32) -> u32 {
+    pub unsafe fn send_bulk(&self, buffer_local: &LocalBufferState, count: u32) -> u32 {
         // SAFETY: memory behind buffer_pool is never mutably accessed.
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local_state();
-        let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         debug_assert!(buffer_local.ref_count.get() > 0);
 
@@ -135,6 +138,7 @@ impl BufferPtr {
             // reference count to refer to this buffer from the new thread.
 
             let buffer_pool = unsafe { &*buffer.buffer_pool };
+            let local = unsafe { &*buffer.buffer_pool }.local_state();
             let shutdown_status = buffer_pool.decrement_local_buffers_in_use(local);
             if shutdown_status == BufferPoolShutdownStatus::ShutdownNow {
                 // Note this definitely won't drop the buffer pool since this buffer isn't released
@@ -148,7 +152,10 @@ impl BufferPtr {
         } else {
             // There are other active references on the current thread.
 
-            if buffer_local.shared_rc_contribution.get() == 0 {
+            if buffer_local.shared_rc_contribution.get() > count {
+                buffer_local.shared_rc_contribution.update(|c| c - count);
+                return count;
+            } else if buffer_local.shared_rc_contribution.get() == 0 {
                 // This thread is the owner, so the shared reference count was never set -
                 // initialize it here since this buffer is going to be referenced by another
                 // thread.
@@ -164,11 +171,15 @@ impl BufferPtr {
 
     /// Used when converting a LocalPacket into a sendable Packet. Increments the shared reference
     /// count and decrements the thread-local reference count.
+    #[inline]
     pub unsafe fn receive(&self, shared_rc_contribution: u32) {
-        // SAFETY: BufferPool and Buffer are never mutably referenced.
+        let buffer_local = unsafe { self.local_buffer_state() };
+        unsafe { self.receive_with_local(buffer_local, shared_rc_contribution); }
+    }
+
+    #[inline]
+    pub unsafe fn receive_with_local(&self, buffer_local: &LocalBufferState, shared_rc_contribution: u32) {
         let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local_state();
-        let buffer_local = local.local_buffer_state(buffer.buffer_id);
 
         let prev_local_rc = buffer_local
             .ref_count
@@ -178,22 +189,20 @@ impl BufferPtr {
             .set(buffer_local.shared_rc_contribution.get() + shared_rc_contribution);
 
         if prev_local_rc == 0 {
+            let local = unsafe { &*buffer.buffer_pool }.local_state();
             unsafe { &*buffer.buffer_pool }.increment_local_buffers_in_use(local);
         }
     }
 
     #[inline]
-    pub unsafe fn take_ref(&self, count: u32) -> u32 {
-        // SAFETY: BufferPool and Buffer are never mutably referenced.
-        let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local_state();
-        let buffer_local = local.local_buffer_state(buffer.buffer_id);
+    pub unsafe fn take_ref(&self, count: u32) {
+        let buffer_local = unsafe { self.local_buffer_state() };
+        unsafe { self.take_ref_with_local(buffer_local, count); }
+    }
 
-        let prev_rc = buffer_local.ref_count.get();
-        buffer_local.ref_count.set(prev_rc + count);
-        assert!(prev_rc > 0);
-
-        prev_rc
+    #[inline]
+    pub unsafe fn take_ref_with_local(&self, buffer_local: &LocalBufferState, count: u32) {
+        buffer_local.ref_count.update(|prev_rc| prev_rc + count);
     }
 
     pub unsafe fn take_shared_ref(&self, count: u32) {
@@ -214,12 +223,14 @@ impl BufferPtr {
         }
     }
 
+    #[inline]
     pub unsafe fn release_ref(&self, count: u32) {
-        // SAFETY: BufferPool and Buffer are never mutably referenced.
-        let buffer = self.as_ref();
-        let local = unsafe { &*buffer.buffer_pool }.local_state();
-        let buffer_local = local.local_buffer_state(buffer.buffer_id);
+        let buffer_local = unsafe { self.local_buffer_state() };
+        unsafe { self.release_ref_with_local(buffer_local, count); }
+    }
 
+    #[inline]
+    pub unsafe fn release_ref_with_local(&self, buffer_local: &LocalBufferState, count: u32) {
         debug_assert!(buffer_local.ref_count.get() >= count);
 
         buffer_local
@@ -231,8 +242,11 @@ impl BufferPtr {
 
         // All local references have been released.
 
+        let buffer = self.as_ref();
         let buffer_pool_ptr = buffer.buffer_pool;
         let buffer_pool = unsafe { &*buffer_pool_ptr };
+
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
         let shutdown_status = buffer_pool.decrement_local_buffers_in_use(local);
 
         // Release this thread's contribution to the shared reference count if applicable.
@@ -270,22 +284,34 @@ impl BufferPtr {
         }
     }
 
+    #[inline]
+    pub unsafe fn local_buffer_state(&self) -> &LocalBufferState {
+        // SAFETY: BufferPool and Buffer are never mutably referenced.
+        let buffer = self.as_ref();
+        let local = unsafe { &*buffer.buffer_pool }.local_state();
+        local.local_buffer_state(buffer.buffer_id)
+    }
+
+    #[inline]
     pub(crate) fn from_ptr(ptr: *mut Buffer) -> Option<BufferPtr> {
         NonNull::new(ptr).map(|ptr| BufferPtr { ptr })
     }
 
+    #[inline]
     pub(crate) fn as_ptr_mut(&self) -> *mut Buffer {
         self.ptr.as_ptr()
     }
 
     // Technically unsafe but it's only used internally and we can eventually make it safe if we
     // make BufferPtr a proper owned handle.
+    #[inline]
     pub(crate) fn as_ref(&self) -> &Buffer {
         unsafe { self.ptr.as_ref() }
     }
 
     // Technically unsafe but it's only used internally and we can eventually make it safe if we
     // make BufferPtr a proper owned handle.
+    #[inline]
     pub(crate) fn get_local_rc(&self) -> u32 {
         let buffer = self.as_ref();
         let local = unsafe { &*buffer.buffer_pool }.local_state();

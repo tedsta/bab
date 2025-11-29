@@ -120,10 +120,12 @@ impl WriterFlushSender {
         let backoff = Backoff::new();
         let mut write_cursor = buffer.write_cursor().load(Ordering::Acquire);
         while write_cursor & WRITE_CURSOR_MASK != write_start {
+            // TODO try to eliminate spinlocks
             backoff.snooze();
             write_cursor = buffer.write_cursor().load(Ordering::Acquire);
         }
         loop {
+            // TODO try to eliminate spinlocks
             match buffer.write_cursor().compare_exchange(
                 write_cursor,
                 new_write_cursor,

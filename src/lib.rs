@@ -6,7 +6,7 @@ extern crate alloc;
 
 pub use buffer::BufferPtr;
 pub use buffer_chain::{BufferChain, BufferChainDrain};
-pub use buffer_pool::{BufferPool, HeapBufferPool};
+pub use buffer_pool::{BufferPool, HeapBufferPool, LocalBufferState};
 pub use buffer_queue::{
     BufferQueueReceiveIterator, BufferQueueReceiver, BufferQueueSender, buffer_queue,
 };

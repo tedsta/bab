@@ -4,14 +4,18 @@ use crate::buffer::BufferPtr;
 
 pub struct Packet {
     buffer: BufferPtr,
+    local_buffer_state: *const crate::buffer_pool::LocalBufferState,
     offset: Cell<u32>,
     len: Cell<u32>,
 }
 
 impl Packet {
     pub unsafe fn new(buffer: BufferPtr, offset: usize, len: usize) -> Self {
+        let local_buffer_state = unsafe { buffer.local_buffer_state() };
+
         Self {
             buffer,
+            local_buffer_state,
             offset: Cell::new(offset as u32),
             len: Cell::new(len as u32),
         }
@@ -19,7 +23,8 @@ impl Packet {
 
     #[inline]
     pub fn send(self) -> SendPacket {
-        let shared_rc_contribution = unsafe { self.buffer.send() };
+        let shared_rc_contribution =
+            unsafe { self.buffer.send_bulk(&*self.local_buffer_state, 1) };
         let packet = SendPacket {
             buffer: self.buffer,
             offset: self.offset.clone(),
@@ -63,6 +68,7 @@ impl Packet {
             let end = end as u32;
             out.write(Packet {
                 buffer: self.buffer,
+                local_buffer_state: self.local_buffer_state,
                 offset: Cell::new(self.offset.get() + offset),
                 len: Cell::new(end - offset),
             });
@@ -71,6 +77,7 @@ impl Packet {
         let last = sorted_offsets.len() - 1;
         out[last].write(Packet {
             buffer: self.buffer,
+            local_buffer_state: self.local_buffer_state,
             offset: Cell::new(self.offset.get() + sorted_offsets[last] as u32),
             len: Cell::new(self.len.get() - sorted_offsets[last] as u32),
         });
@@ -101,13 +108,15 @@ impl AsRef<[u8]> for Packet {
 }
 
 impl Clone for Packet {
+    #[inline]
     fn clone(&self) -> Self {
         unsafe {
-            self.buffer.take_ref(1);
+            self.buffer.take_ref_with_local(&*self.local_buffer_state, 1);
         }
 
         Self {
             buffer: self.buffer,
+            local_buffer_state: self.local_buffer_state,
             offset: self.offset.clone(),
             len: self.len.clone(),
         }
@@ -115,9 +124,10 @@ impl Clone for Packet {
 }
 
 impl Drop for Packet {
+    #[inline]
     fn drop(&mut self) {
         unsafe {
-            self.buffer.release_ref(1);
+            self.buffer.release_ref_with_local(&*self.local_buffer_state, 1);
         }
     }
 }
@@ -144,9 +154,13 @@ unsafe impl Send for SendPacket {}
 impl SendPacket {
     #[inline]
     pub fn receive(self) -> Packet {
-        unsafe { self.buffer.receive(self.shared_rc_contribution) };
+        let local_buffer_state = unsafe { self.buffer.local_buffer_state() };
+        unsafe {
+            self.buffer.receive_with_local(local_buffer_state, self.shared_rc_contribution);
+        }
         let packet = Packet {
             buffer: self.buffer,
+            local_buffer_state,
             offset: self.offset.clone(),
             len: self.len.clone(),
         };
