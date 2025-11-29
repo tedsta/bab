@@ -24,6 +24,7 @@ waitq = "0.0"
 [dev-dependencies]
 async-executor = "1.12"
 async-unsync = "0.3"
+bytes = "1"
 core_affinity = "0.8"
 criterion = "0.3"
 pollster = "0.3"

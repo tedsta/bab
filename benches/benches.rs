@@ -104,7 +104,7 @@ fn clone_packet_1033(c: &mut Criterion) {
     let buffer_pool = bab::HeapBufferPool::new(1033, 2, 2);
     let mut framer = bab::Framer::new(buffer_pool);
 
-    let buf: &mut [u8] = framer.try_write().unwrap();
+    let _buf = framer.try_write().unwrap();
     framer.commit(1033);
     let packet = framer.next_buffer().unwrap();
 
